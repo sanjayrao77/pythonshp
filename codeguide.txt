@@ -1,0 +1,403 @@
+
+This is a guide to understand pythonshp.py.
+
+There are two parts in this guide, a guide to the "options" variables and
+a guide to understanding the python classes.
+
+-------------------------------------------------
+PART 1: OPTION VARIABLES, ordered by importance
+-------------------------------------------------
+
+
+options['width'] = int
+	Number of pixels wide for the target image.
+
+options['height'] = int
+	Number of pixels tall for the target image. I recommend height=width,
+otherwise a lot of things will appear weird. Also, only height=width has been
+tested.
+
+options['labelfont'] = string
+	This specifies the font face and size for longitude and latitude labels.
+A good value is '14px sans'.
+
+options['spherem'] = scale, as string
+	This chooses which scale data should be used for the sphere. Value values are
+'10m', '50m' and '110m'.
+	'10m' has a lot of detail and will clutter maps that aren't large enough to
+display the detail. For computer screens, '50m' seems better.
+	'50m' has almost all of the world regions as 10m and looks better on
+a screen.
+	'110m' has the least detail and is missing many countries/regions. However,
+the output looks really clean and the svg file size is much smaller.
+
+options['zoomm'] = scale, as string
+	This chooses the scale data for zoom insets. '50m' works well but so does
+'10m'. 10m will in general make larger file sizes.
+
+options['gsg'] = string
+	Setting this will specify which admin0 region to highlight and use for
+centering. Values come from admin0 dbf SOV_A3 and ADM0_A3 fields.
+E.g.
+	options['gsg']='US1.USA' # usa
+	options['gsg']='CAN.CAN' # canada
+
+options['halflightgsgs'] = array of gsg values, as strings
+	Similar to highlights, halflights are not quite as highlighted. Multiple
+gsg values can be set.
+	If options['gsg'] is included in 'halflightgsgs', it will be drawn as
+a highlight rather than a halflight.
+E.g.
+	options['halflightgsgs']=['CAN.CAN','US1.USA','MEX.MEX']
+
+
+options['presence'] = array of scales, in strings
+	The default is to try drawing a map at the selected scale. This specifies in
+what scales the admin0 shape actually exists. In future versions, this can be
+used to get the active region from a different scale than 'spherem'.
+
+options['isfullhighlight'] = bool
+	This will be replaced by options['presence']. Currently, if set True, this
+will draw the specified admin0 shape from 10m, even if the current 'spherem'
+scale is something else.
+
+options['ispartlabels'] = bool
+	Setting this True will number the different parts of the shp polygon in the
+svg output. This is useful for identifying which part index corresponds to
+which area on the map. You can toggle "ispartlabeltop_global" to draw the
+labels from the bottom or top.
+
+options['isinsettripel'] = bool
+	Should the Winkel Tripel full-world map be drawn as an inset? Default is
+True.
+
+options['isinsetleft'] = bool
+	Should the Tripel full-world map be on the left-hand side? False =>
+right-hand side.
+
+options['istopinsets'] = bool
+	Should the Tripel and zoom insets be on the top? Default is False,
+the bottom of the screen.
+
+options['lonlabel_lat'] = int
+	Where should the longitude labels be, in latitude. Value is in degrees.
+
+options['latlabel_lon'] = int
+	Where should the latitude labels be, in longitude. Value is in degrees.
+
+options['islakes'] = bool
+	Should lakes be drawn? They look good. Default is True.
+
+options['borderlakes'] = array of strings
+	This specifies the names of lakes that overlap the region's border. This
+setting will draw the region's border over the specified lakes. Without
+this setting, lakes will hide the border if the region is highlighted.
+E.g. (Malawi)
+	options['borderlakes']=['Lake Malawi']
+
+options['title'] = string
+	This is unreferenced but it is inserted in the svg header in a comment, to
+explain the contents.
+
+options['moredots'] = array of 3-tuples, (a,b,c) where a:radius beyond shape
+options['moredots_10m'] = array of 3-tuples, (a,b,c) where a:radius beyond shape
+options['moredots_50m'] = array of 3-tuples, (a,b,c) where a:radius beyond shape
+options['moredots_110m'] = array of 3-tuples, (a,b,c) where a:radius beyond shape
+		perimeter, b:width of stroke, c:partindices[]
+	This will draw green circles around "parts" of polygons. The parts are
+referenced by their index in the shp record. The width of the stroke is in 1..4
+for the pixel width, or False=>1 and True=>4. Note that the natural radius of
+the polygon would be a "0" value for "a". E.g.: options['moredots'] = [
+(4,1,[0]) ] # this creates a circle with 4px padding, 1px width around the
+first part
+	Note that 'moredots' part indices are in the 'spherem' scale. 'moredots_10m'
+defines them in 10m, 'moredots_50m' defines them in 50m and 'moredots_110m'
+defines them in 110m.
+	It's more manageable to define these using a specified scale ('moredots_10m'
+is a good choice) rather than using 'moredots'.
+
+options['zoomdots'] = array of 3-tuples, a la options['moredots']
+	This is like options['moredots'] but it draws the circles on the zoom inset.
+	Note that these part indices are in the 'zoomm' scale.
+
+options['smalldots'] = array of ints, as part indices
+	This is a shortcut to options['moredots']. It's best not to use this.
+
+options['iszoom'] = bool
+	Setting this True will create a zoom inset on the right-hand side. The
+default zoom scaling is 2. The default center of the zoom is the lon/lat
+center of all the shape's parts.
+
+options['zoomscale'] = int
+	This sets the level of zoom for the zoom inset. The default value is 2. Only
+some values will work well.
+	Working values are: 2,2.5,4,5,8,10,16,20,32,40,64,... 
+	Not-great values are: 3,6,7, etc. that don't divide 10 well
+
+options['partindices'] = array of int, index values of parts
+options['full_partindices'] = array of int, index values of parts
+options['zoom_partindices'] = array of int, index values of parts
+	The default is to draw every part in a polygon. This selects which parts (by
+index) should be drawn.
+	'partindices' refers to drawing on the sphere, with values in the 'spherem'
+scale
+	'full_partindices' refers to 10m, is used for Tripel inset
+	'zoom_partindices' refers to 'zoomm' scale, used for the zoom
+
+options['lon'] = int, in degrees
+	The default is to center the map drawing on the longitude of the center of
+the union of all the parts of a polygon. This option lets you override the
+longitude calculation.
+
+options['lat'] = int, in degrees
+	The default is to center the map drawing on a longitude based on the center
+of the union of all the parts of a polygon, but scaled and clipped by the
+tropics. This option lets you override the latitude calculation. This might
+require options['lon'] set as well.
+
+options['tripelboxes'] = array of array of ints, in part indices
+	The default is to draw a green rectangle on the Tripel inset around the union
+of the parts. This option lets you specify which part(s) should have the
+rectangle.
+	These should be specified in 10m part indices.
+E.g.
+	options['tripelboxes']=[ [0,1,2], [70] ] # this creates 2 boxes, one around the first 3 parts and one on part 70
+	options['tripelboxes']=[ [-1] ] # draw a single box over all parts
+
+options['centerdot'] = (radius:int,thickness)
+	This draws a green circle around the center of the shape on the sphere. The
+radius is 'radius' and the thickness of the circle is 'thickness'. Valid values
+for thickness: [1,2,3,4,False,True]
+These are similar if there is only 1 part to the polygon:
+	options['centerdot']=(radius+padding,thickness)
+and
+	options['moredots']=(padding,thickness,[0])
+
+options['centerindices'] = array of ints, as part indices
+options['centerindices_10m'] = array of ints, as part indices
+options['centerindices_50m'] = array of ints, as part indices
+options['centerindices_110m'] = array of ints, as part indices
+	This will only use the specified parts to calculate the shape's center.
+Non-specified parts will still be drawn.
+	It's best to just use 'centerindices_10m' with 10m part indices as it works
+everywhere.
+
+options['istopinsets'] = bool
+	If set True, this will place insets on the top of the image instead of the
+bottom.
+
+options['iszoom34'] = bool
+	If set True, this will use a 3/4 size zoom inset. This requires
+options['iszoom']=True to draw an inset.
+
+options['issubland'] = bool, not working currently
+	Setting this True (default is False) will enable drawing admin1
+state/province borders.
+	** This has worked in the past but needs updating to be functional again. **
+	
+options['cmdline'] = string
+	Saves the generating command line in the svg output as a comment
+
+options['copyright'] = string
+	Saves a copyright string in the svg output as a comment
+
+options['bgcolor'] = string
+	Sets a background color for the image. The default is transparent.
+E.g. options['bgcolor']='#000000'
+
+
+options['index'] = int
+options['full_index'] = int
+options['zoom_index'] = int
+	These hold the index number in the admin0 shp file to draw. Note that the
+admin0 dbf file refers to "record number" where "record number" =
+options['index'] + 1.
+	In general, this isn't worth setting. Different scales and lake/nolake versions
+have different indices so you're better off setting 'gsg'.
+	'index' refers to the 'spherem' scale, full_ is for '10m' and zoom_ is for the
+scale of the zoom inset ('zoomm').
+
+
+-------------------------------------------------
+PART 2: PYTHON CLASSES, alphabetical order
+-------------------------------------------------
+
+class BoxZoomCleave():
+	This trims shapes to fit a specified rectangle, in the flat x,y plane.
+
+class CornerCleave():
+	This trims shapes to remove a corner. This is used to remove the shapes
+from behind an inset.
+
+class Dbf():
+	This loads and stores database data from a dbf file.
+
+class DegLonLat():
+	This is a basic point, with units in degrees of longitude and latitude.
+
+class FieldDbf():
+	One field of a dbf file.
+
+class FlatCircle():
+	A great circle of the sphere, flattened to a plane.
+
+class FlatLatitude():
+	A latitude circle, flattened.
+
+class FlatLongitude():
+	A latitude circle, flattened.
+
+class FlatPoint():
+	An x,y,z point, flattened to x,y.
+
+class FlatPolygon():
+	A polygon in x,y,z space, flattened to x,y.
+
+class FlatPolyline():
+	A polyline in x,y,z space, flattened to x,y.
+
+class FlatShape():
+	A generic x,y,z shape, flattened to x,y.
+
+class HemiCleave():
+	This trims shapes on a sphere, trimming away the back half of the sphere.
+
+class Install():
+	This handles filename locations of shp and dbf files.
+
+class InstallFile():
+	This stores info on installed files.
+
+class Intersection():
+	When a polygon or polyline crosses a cleave border, it's stored here
+as an Intersection.
+
+class Intersections():
+	A group of class Intersection.
+
+class Mbr():
+	Minimum Bounding Rectangle. This is basic for shp file data.
+
+class MercatorPoint():
+	A point on a mercator map.
+
+class MercatorPolygon():
+	A polygon on a mercator map.
+
+class MercatorPolyline():
+	A polyline on a mercator map.
+
+class MinusPoint():
+	Similar to a DegLonLat, but it stores values in ints rather than
+doubles. This is faster and makes it easier to compare points.
+
+class Output():
+	Manages svg output. It also bundles paths that have the same css values.
+
+class OutputPath():
+	Used for merging paths.
+
+class PartCircle():
+	For drawing circle highlights around shape parts.
+
+class Polygon():
+	A basic polygon, one step from shp data.
+
+class Polyline():
+	A basic polyline, one step from shp data.
+
+class Segments():
+	For storing points as a linked list instead of array.
+
+class SegmentSet():
+	Groups of Segments.
+
+class Shape():
+	A basic shape, holding shp data.
+
+class ShapePlus():
+	Advanced from a Shape, this groups polygons by clockwise/counterclockwise. It
+also allows merging two ShapePlus objects.
+
+class ShapePolyline():
+	Used for creating longitude/latitude lines from a group of points. This is
+an alternative to using ellipses.
+
+class Shift():
+	For translating flat shapes, this is used for zoom insets.
+
+class ShpAdmin():
+	A manager for admin0 data, this groups shp, dbf, etc. in one place.
+
+class ShpAdminShape():
+	A Shape, tailored for admin0.
+
+class ShpAdminShapeIntersection():
+	Keeps track of two ShpAdmin shapes overlapping each other. This is used to
+draw highlighted borders over lakes drawn over highlighted shapes.
+
+class Shp():
+	The basic shp file, stored in memory. The goal is to store it as
+accurately as possible without modification.
+
+class SphereCircle():
+	A circle on the sphere. This is handy for longitude/latitude circles
+drawn as ellipses.
+
+class SphereLatitude():
+	A latitude circle on the sphere.
+
+class SphereLongitude():
+	A longitude circle on the sphere.
+
+class SpherePoint():
+	A point in x,y,z space, on the surface of the unit sphere.
+
+class SpherePolygon():
+	A polygon made of SpherePoint points.
+
+class SpherePolyline():
+	A polyline made of SpherePoint points.
+
+class SphereRotation():
+	A lon/lat rotation of the sphere. It supports two rotations and
+stores itself as a recentering from (0,0).
+
+class SphereShape():
+	A generic shape on the unit sphere.
+
+class SvgFragment():
+	Used for building svg paths
+
+class SvgPath():
+	Stores a path for svg.
+
+class SvgPolyline():
+	Stores a polyline for svg.
+
+class TripelPolygon():
+	A polygon in Winkel Tripel space.
+
+class TripelPolyline():
+	A polyline in Winkel Tripel space.
+
+class TripelShape():
+	A generic shape in Tripel space.
+
+class WebMercatorCleave():
+	Trims shapes for WebMercator. It's necessary to trim high and low lats and
+can be used to trim out Antarctica as well.
+
+class WebMercatorShape():
+	A shape in WebMercator space.
+
+class WorldBlob():
+	This stores shapes in WorldMinus shapes. It's used to grow and compare
+shapes more efficiently than using floats.
+
+class WorldCompress():
+	This creates contintent shapes by merging countries. This increses svg
+efficiency by not double-drawing as many region borders.
+
+class WorldMinus():
+	Used for WorldBlob, stores shapes in MinusPoint points.
