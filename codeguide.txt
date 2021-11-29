@@ -222,6 +222,13 @@ scale of the zoom inset ('zoomm').
 PART 2: PYTHON CLASSES, alphabetical order
 -------------------------------------------------
 
+There are many test procedures which demonstrate how the classes work. You
+could start with sphere_test() by running:
+" ./pythonshp.py verbose sphere_test > /tmp/out.svg ",
+proceed to sphere2_test() and so on. There is a list of _test
+procedures in runparams().
+
+
 class BoxZoomCleave():
 	This trims shapes to fit a specified rectangle, in the flat x,y plane.
 
