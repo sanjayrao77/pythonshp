@@ -4063,7 +4063,8 @@ class WorldCompress():
 	def addmiddleeast(self):
 		if self.shp.installfile.scale in ['10m','50m']:
 			set1=('AFG.AFG','IRN.IRN','IRQ.IRQ','KWT.KWT','SAU.SAU','ARE.ARE','OMN.OMN','OMN.OMN','YEM.YEM','JOR.JOR',
-					'SYR.SYR','TUR.TUR')
+					'IS1.PSX','IS1.ISR',
+					'SYR.SYR','LBN.LBN','TUR.TUR')
 			set2=( 'ARM.ARM','GEO.GEO' )
 			self.startblob('TKM.TKM')
 			for gsg in set1: self.addtoblob(gsg)
@@ -4224,7 +4225,7 @@ def worldcompress_test():
 	admin0.setccwtypes()
 	admin0.loadlakes()
 
-	rotation.set_deglonlat(-60,0)
+	rotation.set_deglonlat(40,10)
 
 	wc=WorldCompress(admin0,-1)
 	wc.addcontinents('worldcompress_test')
