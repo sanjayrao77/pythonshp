@@ -3190,11 +3190,9 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 					sasi.setinside(l)
 				zoom_borderlakeshapes=sasi.exportlines()
 
-
 		for plus in borderlakeshapes:
 			if plus.type!=POLYLINE_TYPE_SHP: continue
 			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si')
-		
 
 	if 'moredots' in options: # [ (r0,isw0,[partindex00,partindex01]), ... , (rn,iswn,[partindexn0..partindexnm]) ]
 		for moredots in options['moredots']:
@@ -4329,7 +4327,7 @@ class WorldCompress():
 					)
 			self.startblob('PRT.PRT')
 			for gsg in set1: self.addtoblob(gsg)
-	def _addeuro(self):
+	def _addeuro(self,isscand):
 			self.startblob('PRT.PRT')
 			self.addtoblob('ESP.ESP')
 			self.skipfromblob('AND.AND')
@@ -4339,8 +4337,9 @@ class WorldCompress():
 			for gsg in ['AUT.AUT','HUN.HUN','CZE.CZE','SVK.SVK','POL.POL','LTU.LTU','LVA.LVA','EST.EST']: self.addtoblob(gsg)
 			for gsg in ['ROU.ROU','BGR.BGR','ITA.ITA','HRV.HRV','SVN.SVN','GRC.GRC']: self.addtoblob(gsg)
 			self.removeskips()
-			self.startblob('SWE.SWE')
-			self.addtoblob('FI1.FIN')
+			if isscand:
+				self.startblob('SWE.SWE')
+				self.addtoblob('FI1.FIN')
 	def addcontinents(self,label=''):
 		if self.shp.installfile.scale=='10m':
 			print('Not making worldcompress for 10m: %s'%label,file=sys.stderr)
@@ -4360,11 +4359,11 @@ class WorldCompress():
 		if isverbose_global: print('Asia ',end='',file=sys.stderr,flush=True)
 		self.addasia()
 		if isverbose_global: print('done',file=sys.stderr,flush=True)
-	def addeuro(self):
+	def addeuro(self,isscand=True):
 		label='euro '
 		if isverbose_global: print('Creating %sblobs: '%label,end='',file=sys.stderr,flush=True)
 		if isverbose_global: print('Euro ',end='',file=sys.stderr,flush=True)
-		self._addeuro()
+		self._addeuro(isscand)
 		if isverbose_global: print('done',file=sys.stderr,flush=True)
 	def removeskips(self):
 		self.removeoverlaps(self.skiplist,None)
@@ -5976,7 +5975,9 @@ def euromap(output,overrides):
 		admin0.bynickname[gsg].setdraworder(-1,2)
 
 	eu_wc=WorldCompress(admin0,-1,source_draworder=1)
-	eu_wc.addeuro()
+	iscompressscandinavia=True
+	if 'SWE.SWE' in options['gsgs'] or 'FI1.FIN' in options['gsgs']: iscompressscandinavia=False
+	eu_wc.addeuro(iscompressscandinavia)
 	other_wc=WorldCompress(admin0,-1)
 	other_wc.addafrica()
 	other_wc.addmiddleeast()
@@ -5993,6 +5994,8 @@ def euromap(output,overrides):
 			else: print('Skipping gsg:%s, not found in %s'%(gsg,options['spherem']),file=sys.stderr)
 		css.append('sh')
 		css.append('sq')
+
+	eu_wc.removeoverlaps(admin0.shapes,3) # remove draworder 3 (highlights) from border polylines
 
 	euborderlakeshapes=[]
 	if 'EST.EST' not in options['gsgs']: 
@@ -6025,50 +6028,54 @@ def euromap(output,overrides):
 	print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']])
 	print_squarewater_svg(output,width)
 
-	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
-				boxzoomcleave=bzc,cornercleave=cc)
+	if True: # draw plain background countries
+		for one in admin0.shapes:
+			one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
+					boxzoomcleave=bzc,cornercleave=cc)
 
-	pluses=other_wc.getpluses(isnegatives=False,isoverlaps=False)
-	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sl',csspatch='sp',boxzoomcleave=bzc)
+	if True: # draw worldcompress continents
+		pluses=other_wc.getpluses(isnegatives=False,isoverlaps=False)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sl',csspatch='sp',boxzoomcleave=bzc)
 
-	pluses=eu_wc.getpluses(isnegatives=False,isoverlaps=False)
-	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='al',csspatch='ap',boxzoomcleave=bzc)
+		pluses=eu_wc.getpluses(isnegatives=False,isoverlaps=False)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='al',csspatch='ap',boxzoomcleave=bzc)
 
-	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
-				boxzoomcleave=bzc,cornercleave=cc)
+	if True: # draw andorra, switzerland, halflights and highlights
+		for one in admin0.shapes:
+			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
+					boxzoomcleave=bzc,cornercleave=cc)
 
-	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='al',csspatch='ap',
-				boxzoomcleave=bzc,cornercleave=cc)
+		for one in admin0.shapes:
+			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='al',csspatch='ap',
+					boxzoomcleave=bzc,cornercleave=cc)
 
-	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,3,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',
-				boxzoomcleave=bzc,cornercleave=cc,islabels=options['ispartlabels'])
+		for one in admin0.shapes:
+			one_sphere_print_svg(output,one,3,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',
+					boxzoomcleave=bzc,cornercleave=cc,islabels=options['ispartlabels'])
 
-	if True:
+	if True: # draw continent ccws
 		negatives=eu_wc.getnegatives()
 		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
 		negatives=other_wc.getnegatives()
 		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
 
-	if True:
+	if True: # draw lakes
 		pluses=admin0.getlakes()
 		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
 
-	if True:
+	if True: # draw continent borders, intersections with highlights already removed
 		pluses=other_wc.getpluses(ispositives=False,isoverlaps=True)
 		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='sb',boxzoomcleave=bzc)
 		pluses=eu_wc.getpluses(ispositives=False,isoverlaps=True)
 		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='ab',boxzoomcleave=bzc)
 
-	for plus in euborderlakeshapes:
-		if plus.type!=POLYLINE_TYPE_SHP: continue
-		oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='sb',boxzoomcleave=bzc)
-	for plus in gsgborderlakeshapes:
-		if plus.type!=POLYLINE_TYPE_SHP: continue
-		oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si',boxzoomcleave=bzc)
+	if True: # draw highlight intersections with lakes over lakes
+		for plus in euborderlakeshapes:
+			if plus.type!=POLYLINE_TYPE_SHP: continue
+			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='sb',boxzoomcleave=bzc)
+		for plus in gsgborderlakeshapes:
+			if plus.type!=POLYLINE_TYPE_SHP: continue
+			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si',boxzoomcleave=bzc)
 
 	if moredots:
 		for dots in moredots:
@@ -6077,7 +6084,7 @@ def euromap(output,overrides):
 			sds=int((dots[1]*width)/1000)
 			isw=dots[2]
 			smalldots=dots[3]
-			cssclass='c1'
+			cssclass='c1' # only c1/w1 are included in css above
 			if isinstance(isw,bool) and isw: cssclass='c4'
 			elif isw==1: cssclass='c1'
 			elif isw==2: cssclass='c2'
