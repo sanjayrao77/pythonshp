@@ -62,10 +62,16 @@ will draw the specified admin0 shape from 10m, even if the current 'spherem'
 scale is something else.
 
 options['ispartlabels'] = bool
+	This is mostly replaced with 'isfullpartlabels', which uses 10m parts.
+	Note that this uses the scale of options['spherem'], but most code using
+part indices use 10m data.
+
+options['isfullpartlabels'] = bool
 	Setting this True will number the different parts of the shp polygon in the
 svg output. This is useful for identifying which part index corresponds to
 which area on the map. You can toggle "ispartlabeltop_global" to draw the
 labels from the bottom or top.
+	Note that this uses 10m, much like a lot of the code using part indices.
 
 options['isinsettripel'] = bool
 	Should the Winkel Tripel full-world map be drawn as an inset? Default is
@@ -321,6 +327,11 @@ class SegmentSet():
 
 class Shape():
 	A basic shape, holding shp data.
+
+class ShapeCompress():
+	This can be used to merge multiple shapes. It was first used to
+merge the regions of Cyprus into a single shape.
+	Merging can also happen at the ShapePlus level and with WorldCompress.
 
 class ShapePlus():
 	Advanced from a Shape, this groups polygons by clockwise/counterclockwise. It

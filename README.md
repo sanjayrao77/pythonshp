@@ -1,14 +1,15 @@
 # pythonshp
 
 ## Overview
-This creates wikipedia-style locator maps from free Natural Earth Data shp and
+This creates wikipedia-style maps from free Natural Earth Data shp and
 dbf files (naturalearthdata.com). Thank you Natural Earth Data!
 
 It can also be used to read SHP files in general.
 
-Example:
+Examples:
 <p float="left">
-	<img src="http://www.evilcouncil.com/locators/laos_locator.png" width="100" />
+	<img src="http://www.evilcouncil.com/github/laos_w1_locator.svg" width="200" />
+	<img src="http://www.evilcouncil.com/github/luxembourg_w1_euromap.svg" width="200" />
 </p>
 
 ## License
@@ -29,11 +30,12 @@ e.g.:
 pythonshp.py will look in several directories for several versions of the files. You
 can modify or review the search by looking at the "class Install()" code.
 
-These files from naturalearthdata.com are required (with the default settings):
+These files from naturalearthdata.com are required when using the default settings:
 1. ne\_10m\_admin\_0\_countries.zip
 2. ne\_50m\_admin\_0\_countries.zip
-3. ne\_50m\_lakes.zip
-4. ne\_110m\_land.zip
+3. ne\_50m\_admin\_0\_breakaway\_disputed\_areas.zip
+4. ne\_50m\_lakes.zip
+5. ne\_110m\_land.zip
 
 
 ### Download steps
@@ -47,16 +49,18 @@ These files from naturalearthdata.com are required (with the default settings):
 6. Click on "Cultural" under "Medium scale data" (50m)
 7. Click on "Download countries" under "Admin 0 Countries"
 8. Save this as a zip file (ne\_50m\_admin\_0\_countries.zip)
+9. Click on "Download breakaway and disputed areas" under "Admin 0 - Breakaway, disputed areas"
+10. Save this as a zip file (ne\_50m\_admin\_0\_breakaway\_disputed\_areas.zip)
 
-9. Go back to http://naturalearthdata.com/downloads with a web browser
-10. Click on "Physical" under "Medium scale data" (50m)
-11. Click on "Download lakes" under "Lakes"
-12. Save this as a zip file (ne\_50m\_lakes.zip)
+11. Go back to http://naturalearthdata.com/downloads with a web browser
+12. Click on "Physical" under "Medium scale data" (50m)
+13. Click on "Download lakes" under "Lakes"
+14. Save this as a zip file (ne\_50m\_lakes.zip)
 
-13. Go back to http://naturalearthdata.com/downloads with a web browser
-14. Click on "Physical" under "Small scale data" (110m)
-15. Click on "Download land" under "Land"
-16. Save this as a zip file (ne\_110m\_land.zip)
+15. Go back to http://naturalearthdata.com/downloads with a web browser
+16. Click on "Physical" under "Small scale data" (110m)
+17. Click on "Download land" under "Land"
+18. Save this as a zip file (ne\_110m\_land.zip)
 
 ### Unzipping
 
@@ -93,6 +97,8 @@ Found file coast.shp (10m) -> ned/10m-coast/ne_10m_coastline.shp
 Found file ocean.shp (110m) -> ned/110m-ocean/ne_110m_ocean.shp
 Found file land.shp (10m) -> ned/10m-land/ne_10m_land.shp
 Found file land.shp (110m) -> ned/110m-land/ne_110m_land.shp
+Found file admin0-disputed.shp (50m) -> ned/50m-admin/ne_50m_admin_0_breakaway_disputed_areas.shp
+Found file admin0-disputed.dbf (50m) -> ned/50m-admin/ne_50m_admin_0_breakaway_disputed_areas.dbf
 ```
 
 ### Inkscape
@@ -139,6 +145,7 @@ ashmoreandcartierislands
 australia
 austria
 azerbaijan
+azerbaijan\_disputed
 bahrain
 bajonuevobank
 bangladesh
@@ -169,6 +176,7 @@ centralafricanrepublic
 chad
 chile
 china
+china\_disputed
 clippertonisland
 colombia
 comoros
@@ -179,6 +187,8 @@ croatia
 cuba
 curacao
 cyprus
+cyprus\_disputed
+cyprusfull
 cyprusnomansarea
 czechia
 democraticrepublicofthecongo
@@ -202,11 +212,13 @@ federatedstatesofmicronesia
 fiji
 finland
 france
+france\_disputed
 frenchpolynesia
 frenchsouthernandantarcticlands
 gabon
 gambia
 georgia
+georgia\_disputed
 germany
 ghana
 gibraltar
@@ -219,6 +231,7 @@ guernsey
 guinea
 guineabissau
 guyana
+guyana\_disputed
 haiti
 heardislandandmcdonaldislands
 honduras
@@ -226,6 +239,7 @@ hongkongsar
 hungary
 iceland
 india
+india\_disputed
 indianoceanterritories
 indonesia
 iran
@@ -233,14 +247,17 @@ iraq
 ireland
 isleofman
 israel
+israel\_disputed
 italy
 ivorycoast
 jamaica
 japan
+japan\_disputed
 jersey
 jordan
 kazakhstan
 kenya
+kenya\_disputed
 kiribati
 kosovo
 kuwait
@@ -248,6 +265,7 @@ kyrgyzstan
 laos
 latvia
 lebanon
+lebanon\_disputed
 lesotho
 liberia
 libya
@@ -267,11 +285,13 @@ mauritania
 mauritius
 mexico
 moldova
+moldova\_disputed
 monaco
 mongolia
 montenegro
 montserrat
 morocco
+morocco\_disputed
 mozambique
 myanmar
 namibia
@@ -291,6 +311,7 @@ northkorea
 norway
 oman
 pakistan
+pakistan\_disputed
 palau
 palestine
 panama
@@ -307,6 +328,7 @@ republicofserbia
 republicofthecongo
 romania
 russia
+russia\_disputed
 rwanda
 saintbarthelemy
 sainthelena
@@ -331,16 +353,20 @@ slovakia
 slovenia
 solomonislands
 somalia
+somalia\_disputed
 somaliland
 southafrica
 southgeorgiaandtheislands
 southkorea
 southsudan
+southsudan\_disputed
 spain
 spratlyislands
 srilanka
 sudan
+sudan\_disputed
 suriname
+suriname\_disputed
 sweden
 switzerland
 syria
@@ -358,6 +384,7 @@ turksandcaicosislands
 tuvalu
 uganda
 ukraine
+ukraine\_disputed
 unitedarabemirates
 unitedkingdom
 unitedrepublicoftanzania
@@ -373,6 +400,7 @@ venezuela
 vietnam
 wallisandfutuna
 westernsahara
+westernsahara\_disputed
 yemen
 zambia
 zimbabwe

@@ -577,7 +577,22 @@ class ShapePlus():
 			for pl in self.polylines:
 				if pl.partindex==partindex: return True
 		return False
-	def augment(self,cand,isexact):
+	def toshape(self):
+		if self.type!=POLYGON_TYPE_SHP: raise ValueError # unimp
+		shape=Shape(-1,-1)
+		shape.type=POLYGON_TYPE_SHP
+		shape.ccwtypes={}
+		shape.partlist=[]
+		shape.pointlist=[]
+		shape.draworderlist=[]
+		for pg in self.polygons:
+			shape.partlist.append(len(shape.pointlist))
+			shape.pointlist+=pg.points
+		shape.mbr=None # TODO
+		shape.partscount=len(shape.partlist)
+		shape.pointscount=len(shape.pointlist)
+		return shape
+	def augment(self,cand,isexact): # this is mostly replaced with ShapeCompress
 		if cand.type!=POLYGON_TYPE_SHP: return None
 		pg1=self.polygons[0]
 		pg2=cand.polygons[0]
@@ -665,6 +680,7 @@ class Shape():
 			y=getdouble(shapedata,12)
 			ret.point=DegLonLat(x,y)
 			offset+=20
+			ret.draworder=0
 		elif ret.type==NULL_TYPE_SHP:
 			offset+=4
 		else:
@@ -673,6 +689,15 @@ class Shape():
 	def __init__(self,index,shapenumber):
 		self.index=index
 		self.number=shapenumber
+	def setdraworder(self,partidx,draworder):
+		if partidx<0:
+			if hasattr(self,'draworder'): self.draworder=draworder
+			if hasattr(self,'draworderlist'):
+				for i in range(len(self.draworderlist)):
+					self.draworderlist[i]=draworder
+		else:
+			if partidx<self.partscount:
+				self.draworderlist[partidx]=draworder
 	def print(self,prefix=''):
 		print('%snumber: %d, shape: %s, parts: %d, points: %d'%(prefix,self.number,shapename(self.type),self.partscount,self.pointscount))
 		if True:
@@ -776,17 +801,10 @@ class Shp(): # don't try to extend shp, just store data as literally as possible
 		f.close()
 	def setdraworder(self,index,partidx,draworder):
 		shape=self.shapes[index]
-		if partidx<0:
-			shape.draworder=draworder
-			if hasattr(shape,'draworderlist'):
-				for i in range(len(shape.draworderlist)):
-					shape.draworderlist[i]=draworder
-		else:
-			if partidx<shape.partscount:
-				shape.draworderlist[partidx]=draworder
+		shape.setdraworder(partidx,draworder)
 	def resetdraworder(self):
-		for i in range(len(self.shapes)):
-			self.setdraworder(i,-1,0)
+		for shape in self.shapes:
+			shape.setdraworder(-1,0)
 	def getcenter(self,index,partindices): return self.shapes[index].getcenter(partindices)
 	def setnickname(self,index,nickname):
 		s=self.shapes[index]
@@ -2454,10 +2472,11 @@ def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=Non
 	highlight="#449944"
 	highlight="#55aa44"
 	highlight="#45a249"
+	highlight="#45a211"
 	highlight_b='#115511'
 	highlight_bz='#115511'
 	highlight_b='#000000'
-	highlight_tb='#37813a'
+	highlight_tb='#378100'
 
 	if 'tc' in opts: output.print('.tc {stroke:black;fill-opacity:0}')
 	if not isgradients:
@@ -2478,8 +2497,24 @@ def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=Non
 	if 'sh1' in opts: output.print('.sh1 {fill:%s;stroke:%s}'%(highlight,highlight_b))
 	if 'sq1' in opts: output.print('.sq1 {stroke:%s;fill-opacity:0}'%highlight)
 
-	if 'al' in opts: output.print('.al {fill:#ffffff;stroke:#888888}')
-	if 'ap' in opts: output.print('.ap {stroke:#ffffff;fill-opacity:0}')
+	# halflight areas
+# 7aaa58
+# aaaa11
+	if 'al' in opts: output.print('.al {fill:#aaaa11;stroke:#707070}')
+	if 'ap' in opts: output.print('.ap {stroke:#aaaa11;fill-opacity:0}')
+	if 'ab' in opts: output.print('.ab {stroke:#707070;fill-opacity:0}')
+
+	# disputed and breakaway areas
+	if 'dl' in opts: output.print('.dl {fill:#11dd11;stroke:#11dd11;stroke-dasharray:3 3}')
+	# disputed border
+	if 'db' in opts: output.print('.db {fill:#11dd11;stroke:#11dd11;stroke-width:2;stroke-opacity:1}')
+	if 'dp' in opts: output.print('.dp {stroke:#11dd11;fill-opacity:0}')
+	# zoom land
+	if 'dz' in opts: output.print('.dz {fill:#11dd11;stroke:#000000;stroke-dasharray:2 2}')
+	# zoom border
+	if 'dy' in opts: output.print('.dy {fill:#11dd11;stroke-opacity:0}')
+	# zoom patch
+	if 'dx' in opts: output.print('.dx {stroke:#11dd11;stroke-dasharray:3 3;fill-opacity:0}')
 
 	# sphere lon/lat grid
 	if 'sg' in opts: output.print('.sg {stroke:#000000;fill-opacity:0.0;stroke-opacity:0.2}')
@@ -2531,19 +2566,19 @@ def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=Non
 	if 'debugredline' in opts: output.print('.debugredline {stroke:#ff0000;fill-opacity:0}')
 
 	if width==500: # circles
-		if 'c1' in opts: output.print('.c1 {stroke:#449944;fill-opacity:0}')
-		if 'c2' in opts: output.print('.c2 {stroke:#449944;fill-opacity:0}')
-		if 'c3' in opts: output.print('.c3 {stroke:#449944;fill-opacity:0;stroke-width:1.5}')
-		if 'c4' in opts: output.print('.c4 {stroke:#449944;fill-opacity:0;stroke-width:2}')
+		if 'c1' in opts: output.print('.c1 {stroke:%s;fill-opacity:0}'%highlight)
+		if 'c2' in opts: output.print('.c2 {stroke:%s;fill-opacity:0}'%highlight)
+		if 'c3' in opts: output.print('.c3 {stroke:%s;fill-opacity:0;stroke-width:1.5}'%highlight)
+		if 'c4' in opts: output.print('.c4 {stroke:%s;fill-opacity:0;stroke-width:2}'%highlight)
 		if 'w1' in opts: output.print('.w1 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
 		if 'w2' in opts: output.print('.w2 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
 		if 'w3' in opts: output.print('.w3 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:1.5}')
 		if 'w4' in opts: output.print('.w4 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:2}')
 	else:
-		if 'c1' in opts: output.print('.c1 {stroke:#449944;fill-opacity:0}')
-		if 'c2' in opts: output.print('.c2 {stroke:#449944;fill-opacity:0;stroke-width:2}')
-		if 'c3' in opts: output.print('.c3 {stroke:#449944;fill-opacity:0;stroke-width:3}')
-		if 'c4' in opts: output.print('.c4 {stroke:#449944;fill-opacity:0;stroke-width:4}')
+		if 'c1' in opts: output.print('.c1 {stroke:%s;fill-opacity:0}'%highlight)
+		if 'c2' in opts: output.print('.c2 {stroke:%s;fill-opacity:0;stroke-width:2}'%highlight)
+		if 'c3' in opts: output.print('.c3 {stroke:%s;fill-opacity:0;stroke-width:3}'%highlight)
+		if 'c4' in opts: output.print('.c4 {stroke:%s;fill-opacity:0;stroke-width:4}'%highlight)
 		if 'w1' in opts: output.print('.w1 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
 		if 'w2' in opts: output.print('.w2 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:2}')
 		if 'w3' in opts: output.print('.w3 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:3}')
@@ -2934,6 +2969,7 @@ def print_smalldots_svg(output,shape,smalldots,sds,cssclass1,cssclass2,rotation,
 		output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass1,p.x,p.y,radius))
 	
 def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
+# we assume sphere_admin0 == zoom_admin0 if they are the same scale
 	width=options['width']
 	height=options['height']
 	index=options['index']
@@ -2999,6 +3035,22 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 	if 'halflightgsgs' in options:
 		m=['al','ap']
 		for c in m: css.append(c)
+	if options['isdisputed']:
+		css.append('dp')
+		if len(options['disputed']):
+			m=['dl']
+			for c in m: css.append(c)
+		if len(options['disputed_border']):
+			m=['db']
+			for c in m: css.append(c)
+		if options['iszoom']:
+			css.append('dx')
+			if len(options['disputed']):
+				m=['dz']
+				for c in m: css.append(c)
+			if len(options['disputed_border']):
+				m=['dy']
+				for c in m: css.append(c)
 	print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']],isgradients=True)
 
 	if 'bgcolor' in options: print_rectangle_svg(output,0,0,width,height,options['bgcolor'],1.0)
@@ -3013,10 +3065,24 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 			if options['iszoom34']: cornercleave=CornerCleave(0,0.4,-0.4)
 			else: cornercleave=CornerCleave(0,0.2,-0.2)
 
+	if options['isdisputed']:
+		sphere_admin0.loaddisputed()
+		sphere_admin0.selectdisputed(options['disputed'],1)
+		sphere_admin0.selectdisputed(options['disputed_border'],2)
+		if options['spherem']!=options['zoomm']:
+			zoom_admin0.loaddisputed()
+			zoom_admin0.selectdisputed(options['disputed'],1)
+			zoom_admin0.selectdisputed(options['disputed_border'],2)
+
 	if True: #cdebug
-		sphere_wc.removeoverlaps(sphere_admin0,2) # remove draworder 2 (highlights) from border polylines
-		if options['iszoom']:
-			zoom_wc.removeoverlaps(sphere_admin0,2) # remove draworder 2 (highlights) from border polylines
+		sphere_wc.removeoverlaps(sphere_admin0.shapes,2) # remove draworder 2 (highlights) from border polylines
+		if options['isdisputed']: # TODO check if we can remove this?
+			sphere_wc.removeoverlaps(sphere_admin0.disputed_shapes,1)
+			
+		if options['iszoom'] and options['spherem']!=options['zoomm']:
+			zoom_wc.removeoverlaps(sphere_admin0.shapes,2) # remove draworder 2 (highlights) from border polylines
+			if options['isdisputed']: # TODO potential remove
+				zoom_wc.removeoverlaps(zoom_admin0.disputed_shapes,1)
 
 		pluses=sphere_wc.getpluses(isnegatives=False,isoverlaps=False)
 		negatives=sphere_wc.getnegatives()
@@ -3076,6 +3142,12 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 		for one in sphere_admin0.shapes: # highlights
 			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',islabels=options['ispartlabels'])
 
+	if options['isdisputed']:
+		for one in sphere_admin0.disputed_shapes:
+			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='dl',csspatch='dp')
+		for one in sphere_admin0.disputed_shapes:
+			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='db',csspatch='dp')
+
 	if options['isfullpartlabels']:
 		for one in full_admin0.shapes: # highlights
 			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',islabels=True)
@@ -3089,27 +3161,40 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='sb')
 
 	borderlakeshapes=None
+	zoom_borderlakeshapes=None
 	if True and 'borderlakes' in options:
-		if isverbose_global: print('Drawing border lakes',file=sys.stderr)
+		if isverbose_global: print('Drawing border lakes (%s)'%options['spherem'],file=sys.stderr)
 		sasi=ShpAdminShapeIntersection()
-		for shape in sphere_admin0.shapes:
-			(has,_)=shape.hasdraworder(2)
-			if not has: continue
-			pluses=ShapePlus.make(shape)
-			for plus in pluses:
-				if plus.draworder!=2: continue
-				pg=plus.polygons[0]
-				sasi.addpolygon(pg)
+		sasi.addfromshapes(sphere_admin0.shapes,2)
+		if options['isdisputed']: sasi.addfromshapes(sphere_admin0.disputed_shapes,1)
 		for n in options['borderlakes']:
 			l=sphere_admin0.lakes_bynickname[n]
 			if not l:
-				print('Border lake not found: %s'%n,file=sys.stderr)
+				print('Border lake (%s) not found: %s'%(options['spherem'],n),file=sys.stderr)
 				continue
 			sasi.setinside(l)
 		borderlakeshapes=sasi.exportlines()
+		if options['iszoom']:
+			if options['spherem']==options['zoomm']:
+				zoom_borderlakeshapes=borderlakeshapes
+			else:
+				if isverbose_global: print('Drawing border lakes (%s)'%options['zoomm'],file=sys.stderr)
+				sasi=ShpAdminShapeIntersection()
+				sasi.addfromshapes(zoom_admin0.shapes,2)
+				if options['isdisputed']: sasi.addfromshapes(zoom_admin0.disputed_shapes,1)
+				for n in options['borderlakes']:
+					l=zoom_admin0.lakes_bynickname[n]
+					if not l:
+						print('Border lake (%s) not found: %s'%(options['zoomm'],n),file=sys.stderr)
+						continue
+					sasi.setinside(l)
+				zoom_borderlakeshapes=sasi.exportlines()
+
+
 		for plus in borderlakeshapes:
 			if plus.type!=POLYLINE_TYPE_SHP: continue
 			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si')
+		
 
 	if 'moredots' in options: # [ (r0,isw0,[partindex00,partindex01]), ... , (rn,iswn,[partindexn0..partindexnm]) ]
 		for moredots in options['moredots']:
@@ -3264,6 +3349,11 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 		for one in full_admin0.shapes: # highlights
 			one_sphere_print_svg(output,one,2,rotation2,width,height,splitlimit,cssfull='zh',csspatch='zq',
 					boxzoomcleave=bzc)
+		if options['isdisputed']:
+			for one in zoom_admin0.disputed_shapes:
+				one_sphere_print_svg(output,one,1,rotation2,width,height,splitlimit,cssfull='dz',csspatch='dx',boxzoomcleave=bzc)
+			for one in zoom_admin0.disputed_shapes:
+				one_sphere_print_svg(output,one,2,rotation2,width,height,splitlimit,cssfull='dy',csspatch='dx',boxzoomcleave=bzc)
 
 		if options['iszoomlakes']:
 			if isverbose_global: print('Drawing zoom lakes',file=sys.stderr)
@@ -3273,8 +3363,8 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 		pluses=zoom_wc.getpluses(ispositives=False,isoverlaps=True)
 		pluses_sphere_print_svg(output,pluses,rotation2,width,height,splitlimit, cssline='zb',boxzoomcleave=bzc)
 
-		if borderlakeshapes:
-			for plus in borderlakeshapes:
+		if zoom_borderlakeshapes:
+			for plus in zoom_borderlakeshapes:
 				if plus.type!=POLYLINE_TYPE_SHP: continue
 				oneplus_sphere_print_svg(output,plus,rotation2,width,height,splitlimit,cssline='zi',boxzoomcleave=bzc)
 
@@ -3461,6 +3551,14 @@ class Install():
 		self.addfile('land.shp','10m','land', [ 'ne_10m_land.shp' ])
 		self.addfile('land.shp','50m','land', [ 'ne_50m_land.shp' ])
 		self.addfile('land.shp','110m','land', [ 'ne_110m_land.shp' ])
+
+		self.addfile('admin0-disputed.shp','10m','admin', [ 'ne_10m_admin_0_breakaway_disputed_areas.shp' ])
+		self.addfile('admin0-disputed.shp','50m','admin', [ 'ne_50m_admin_0_breakaway_disputed_areas.shp' ])
+		self.addfile('admin0-disputed.shp','110m','admin', [ 'ne_110m_admin_0_breakaway_disputed_areas.shp' ])
+
+		self.addfile('admin0-disputed.dbf','10m','admin', [ 'ne_10m_admin_0_breakaway_disputed_areas.dbf' ])
+		self.addfile('admin0-disputed.dbf','50m','admin', [ 'ne_50m_admin_0_breakaway_disputed_areas.dbf' ])
+		self.addfile('admin0-disputed.dbf','110m','admin', [ 'ne_110m_admin_0_breakaway_disputed_areas.dbf' ])
 	def addfile(self,nickname,scale,dclass,filenames):
 		f=InstallFile(nickname,scale,dclass,filenames)
 		f.findfile()
@@ -3510,6 +3608,8 @@ class Install():
 		self.print('coast.shp')
 		self.print('ocean.shp')
 		self.print('land.shp')
+		self.print('admin0-disputed.shp')
+		self.print('admin0-disputed.dbf')
 	def printlog(self):
 		for d in [self.filenames_10m,self.filenames_50m,self.filenames_110m]:
 			for n in d:
@@ -3611,6 +3711,16 @@ def lakesintersection_test(): # lakes intersecting shape -> border
 		dll_sphere_print_svg(output,dll,rotation,width,height,'c4')
 
 	print_footer_svg(output)
+
+def disputeddbf_test(): # disputed admin0 test
+	dbf=Dbf(install.getfilename('admin0-disputed.dbf'))
+	dbf.selectcfield('BRK_NAME','name')
+	dbf.selectcfield('SOV_A3','sov3')
+	dbf.selectcfield('ADM0_A3','adm3')
+	dbf.loadrecords()
+	for i in range(len(dbf.records)):
+		r=dbf.records[i]
+		print("%d: \"%s\" %s.%s"%(i,r['name'],r['sov3'],r['adm3']))
 
 def admin1dbf_test(): # admin1 test
 	admin1dbf=Dbf(install.getfilename('admin1.dbf'))
@@ -3759,7 +3869,6 @@ class WorldMinus():
 			if MinusPoint.getmlonlat(p)!=MinusPoint.getmlonlat(q): return False
 			offset=(offset-1)%k
 		return True
-		
 	@staticmethod
 	def isreversepolygons(one,two):
 		if len(one.points)!=len(two.points): return False
@@ -3776,7 +3885,6 @@ class WorldMinus():
 		print('WorldMinus(%s):'%self.nickname,file=file)
 		for p in self.points:
 			print(p.mlonlat,file=file)
-		
 	def addtoindex2(self,newpoints): # for polygons
 		if not len(newpoints): return
 		index=self.index
@@ -3881,11 +3989,13 @@ class WorldMinus():
 	def unshift(self,newpoints):
 		self.points=newpoints+self.points
 		self.addtoindex(newpoints)
-	def getplus(self):
+	def getpolygon(self):
 		pg=Polygon(0,0)
-		pg.iscw=True
+		pg.iscw=self.polygon.iscw
 		for p in self.points: pg.points.append(p.dll)
-		return ShapePlus.makefrompolygon(pg,0)
+		return pg
+	def getplus(self):
+		return ShapePlus.makefrompolygon(self.getpolygon(),0)
 
 class WorldBlob():
 	@staticmethod
@@ -3925,6 +4035,10 @@ class WorldBlob():
 		for i in range(1,len(plus.polygons)):
 			self.negatives.append(plus.polygons[i])
 		return True
+	def skipfromblob(self,plus):
+		minus=WorldMinus(plus.polygons[0])
+		if not self.addtoblob_minus(minus): return False
+		return True
 	def subtractfromblob(self,plus):
 		pg=plus.polygons[0]
 		for i in range(len(self.negatives)):
@@ -3943,6 +4057,9 @@ class WorldBlob():
 		if isnegatives:
 			for neg in self.negatives: sp.polygons.append(neg)
 		return sp
+	def addpolygons(self,pgs):
+		pgs.append(self.blob.getpolygon())
+		for neg in self.negatives: pgs.append(neg)
 	def getoverlaps(self):
 		if not len(self.overlaps): return None
 		sp=ShapePlus(0,None)
@@ -3977,20 +4094,49 @@ class WorldBlob():
 					continue
 				i+=1
 			if len(o)>1: self.overlaps.append(o)
+
+class ShapeCompress():
+	def __init__(self,dest_draworder,source_draworder=0):
+		self.dest_draworder=dest_draworder
+		self.source_draworder=source_draworder
+		self.blobs=[]
+	def addshape(self,shape):
+		pluses=ShapePlus.make(shape)
+		for plus in pluses:
+			if self.source_draworder!=plus.draworder: continue
+			found=False
+			for blob in self.blobs:
+				if blob.addtoblob(plus):
+					found=True
+					shape.draworderlist[plus.polygons[0].partindex]=self.dest_draworder
+					break
+			if not found:
+				blob=WorldBlob.makefromplus(plus)
+				self.blobs.append(blob)
+				shape.draworderlist[plus.polygons[0].partindex]=self.dest_draworder
+	def exportshape(self):
+		pgs=[]
+		for blob in self.blobs:
+			blob.addpolygons(pgs)
+		sp=ShapePlus.makefrompolygons(pgs,0)
+		shape=sp.toshape()
+		return shape
 		
 class WorldCompress():
-	def __init__(self,shp,draworder):
+	def __init__(self,shp,dest_draworder,source_draworder=0):
 		self.shp=shp
-		self.draworder=draworder
+		self.dest_draworder=dest_draworder
+		self.source_draworder=source_draworder
 		self.blobs=[]
 		self.currentblob=None
+		self.skiplist=[]
 	def startblob(self,gsg):
 		s=self.shp.bynickname[gsg]
 		if not s: raise ValueError
 		plus=ShapePlus.pickbiggest(ShapePlus.make(s))
-		if s.draworderlist[plus.polygons[0].partindex]: raise ValueError
+		if self.source_draworder!=s.draworderlist[plus.polygons[0].partindex]: raise ValueError # this is plus.draworder
 		blob=WorldBlob.makefromplus(plus)
-		s.draworderlist[plus.polygons[0].partindex]=self.draworder
+		s.draworderlist[plus.polygons[0].partindex]=self.dest_draworder
 		self.blobs.append(blob)
 		self.currentblob=blob
 	def addtoblob(self,gsg,isfindall=False):
@@ -3999,21 +4145,33 @@ class WorldCompress():
 		pluses=ShapePlus.make(s)
 		found=0
 		for pl in pluses:
-			if s.draworderlist[pl.polygons[0].partindex]: continue
+			if self.source_draworder!=s.draworderlist[pl.polygons[0].partindex]: continue # this is plus.draworder
 			if self.currentblob.addtoblob(pl):
 				found+=1
 #				print('adding to blob: %s.%d'%(pl.shape.nickname,pl.polygons[0].partindex),file=sys.stderr) #cdebug
-				s.draworderlist[pl.polygons[0].partindex]=self.draworder
+				s.draworderlist[pl.polygons[0].partindex]=self.dest_draworder
+				if not isfindall: break
+#		if not found: print('NOT adding to blob: %s'%(pl.shape.nickname),file=sys.stderr) #cdebug
+	def skipfromblob(self,gsg,isfindall=False):
+		s=self.shp.bynickname[gsg]
+		if not s: return
+		self.skiplist.append(s)
+		pluses=ShapePlus.make(s)
+		found=0
+		for pl in pluses:
+			if self.currentblob.skipfromblob(pl):
+				found+=1
+#				print('adding to blob: %s.%d'%(pl.shape.nickname,pl.polygons[0].partindex),file=sys.stderr) #cdebug
 				if not isfindall: break
 #		if not found: print('NOT adding to blob: %s'%(pl.shape.nickname),file=sys.stderr) #cdebug
 	def subtractfromblob(self,gsg):
 		s=self.shp.bynickname[gsg]
 		if not s: return
 		pluses=ShapePlus.make(s)
-		for pl in pluses:
-			if s.draworderlist[pl.polygons[0].partindex]!=0: continue
+		for pl in pluses: # this removes ccw as well as removing a redundant floodfill
+			if self.source_draworder!=s.draworderlist[pl.polygons[0].partindex]: continue # this is pl.draworder
 			if self.currentblob.subtractfromblob(pl):
-				s.draworderlist[pl.polygons[0].partindex]=self.draworder
+				s.draworderlist[pl.polygons[0].partindex]=self.dest_draworder
 				break
 	def getpluses(self,ispositives=True,isnegatives=True,isoverlaps=True):
 		ret=[]
@@ -4053,22 +4211,22 @@ class WorldCompress():
 					'MNG.MNG','RUS.RUS','KAZ.KAZ','NPL.NPL','BTN.BTN','IND.IND','PAK.PAK',
 					'BGD.BGD'
 					)
-			set2=('KGZ.KGZ','TJK.TJK','UZB.UZB')
+			set2=('KGZ.KGZ','TJK.TJK','UZB.UZB','TKM.TKM')
 	# ,'UZB.UZB')
-			set3=('FI1.FIN','SWE.SWE','NOR.NOR')
+			set3=('AFG.AFG','FI1.FIN','SWE.SWE','NOR.NOR')
 			for gsg in set1: self.addtoblob(gsg)
 	#		self.addtoblob('RUS.RUS',isfindall=True)
 			for gsg in set2: self.addtoblob(gsg)
+			self.addtoblob('AZE.AZE',isfindall=True)
 			for gsg in set3: self.addtoblob(gsg)
 	def addmiddleeast(self):
 		if self.shp.installfile.scale in ['10m','50m']:
-			set1=('AFG.AFG','IRN.IRN','IRQ.IRQ','KWT.KWT','SAU.SAU','ARE.ARE','OMN.OMN','OMN.OMN','YEM.YEM','JOR.JOR',
+			set1=('IRQ.IRQ','KWT.KWT','SAU.SAU','ARE.ARE','OMN.OMN','OMN.OMN','YEM.YEM','JOR.JOR',
 					'IS1.PSX','IS1.ISR',
 					'SYR.SYR','LBN.LBN','TUR.TUR')
 			set2=( 'ARM.ARM','GEO.GEO' )
-			self.startblob('TKM.TKM')
+			self.startblob('IRN.IRN')
 			for gsg in set1: self.addtoblob(gsg)
-			self.addtoblob('AZE.AZE',isfindall=True)
 			for gsg in set2: self.addtoblob(gsg)
 	def addafrica(self):
 		if self.shp.installfile.scale=='10m':
@@ -4171,6 +4329,18 @@ class WorldCompress():
 					)
 			self.startblob('PRT.PRT')
 			for gsg in set1: self.addtoblob(gsg)
+	def _addeuro(self):
+			self.startblob('PRT.PRT')
+			self.addtoblob('ESP.ESP')
+			self.skipfromblob('AND.AND')
+			for gsg in ['FR1.FRA','LUX.LUX','BEL.BEL','NL1.NLD','DEU.DEU','DN1.DNK']: self.addtoblob(gsg)
+			self.skipfromblob('CHE.CHE')
+			self.skipfromblob('LIE.LIE')
+			for gsg in ['AUT.AUT','HUN.HUN','CZE.CZE','SVK.SVK','POL.POL','LTU.LTU','LVA.LVA','EST.EST']: self.addtoblob(gsg)
+			for gsg in ['ROU.ROU','BGR.BGR','ITA.ITA','HRV.HRV','SVN.SVN','GRC.GRC']: self.addtoblob(gsg)
+			self.removeskips()
+			self.startblob('SWE.SWE')
+			self.addtoblob('FI1.FIN')
 	def addcontinents(self,label=''):
 		if self.shp.installfile.scale=='10m':
 			print('Not making worldcompress for 10m: %s'%label,file=sys.stderr)
@@ -4190,15 +4360,21 @@ class WorldCompress():
 		if isverbose_global: print('Asia ',end='',file=sys.stderr,flush=True)
 		self.addasia()
 		if isverbose_global: print('done',file=sys.stderr,flush=True)
-
-	def removeoverlaps(self,shp,draworder):
+	def addeuro(self):
+		label='euro '
+		if isverbose_global: print('Creating %sblobs: '%label,end='',file=sys.stderr,flush=True)
+		if isverbose_global: print('Euro ',end='',file=sys.stderr,flush=True)
+		self._addeuro()
+		if isverbose_global: print('done',file=sys.stderr,flush=True)
+	def removeskips(self):
+		self.removeoverlaps(self.skiplist,None)
+		self.skiplist=[]
+	def removeoverlaps(self,shapes,draworder):
 		minus=WorldMinus(None)
 		minus.buildindex()
-		shapeids=[]
-		for shape in shp.shapes:
+		for shape in shapes:
 			for i in range(len(shape.draworderlist)):
-				if shape.draworderlist[i]!=draworder: continue
-				if shape.index not in shapeids: shapeids.append(shape.index)
+				if draworder!=None and shape.draworderlist[i]!=draworder: continue
 				start=shape.partlist[i]
 				limit=shape.pointscount
 				if i+1<shape.partscount: limit=shape.partlist[i+1]
@@ -4225,13 +4401,13 @@ def worldcompress_test():
 	admin0.setccwtypes()
 	admin0.loadlakes()
 
-	rotation.set_deglonlat(40,10)
+	rotation.set_deglonlat(60,20)
 
 	wc=WorldCompress(admin0,-1)
 	wc.addcontinents('worldcompress_test')
 
 #	admin0.setdraworder(admin0.bynickname['NAM.NAM'].index,-1,2)
-	wc.removeoverlaps(admin0,2)
+	wc.removeoverlaps(admin0.shapes,2)
 #	admin0.setdraworder(admin0.bynickname['NAM.NAM'].index,-1,0)
 
 	print_header_svg(output,width,height,['sb','sl','sp','debugl','sh','sq','sw','sr'],isgradients=True)
@@ -4239,17 +4415,20 @@ def worldcompress_test():
 	pluses=wc.getpluses(isnegatives=False,isoverlaps=False)
 	pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull='sl',csspatch='sp')
 
-	negatives=wc.getnegatives()
-	pluses_sphere_print_svg(output,negatives,rotation,width,height,4, cssfull='sw',csspatch='sr')
+	if False:
+		negatives=wc.getnegatives()
+		pluses_sphere_print_svg(output,negatives,rotation,width,height,4, cssfull='sw',csspatch='sr')
 
-	pluses=admin0.getlakes()
-	pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull='sw',csspatch='sr')
+	if False:
+		pluses=admin0.getlakes()
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull='sw',csspatch='sr')
 
 	if False:
 		pluses=wc.getpluses(ispositives=False,isoverlaps=True)
 		pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssline='sb')
 
-	for one in admin0.shapes: one_sphere_print_svg(output,one,0,rotation,width,height,4,cssfull='sh',csspatch='sq')
+	if False:
+		for one in admin0.shapes: one_sphere_print_svg(output,one,0,rotation,width,height,4,cssfull='sh',csspatch='sq')
 
 	print_footer_svg(output)
 
@@ -4398,12 +4577,13 @@ def admin0info_test():
 
 def admin0parts_test():
 	scales=['110m']
-	scales=['50m']
 	scales=['10m']
+	scales=['50m']
 
 	gsgs=['RUS.RUS']
 	gsgs=['TTO.TTO']
 	gsgs=['ATA.ATA']
+	gsgs=['CYP.CYP','CYN.CYN']
 
 	sfi=install.getinstallfile('admin0-nolakes.shp',scales)
 	print('shp filename: %s'%sfi.filename)
@@ -4633,7 +4813,7 @@ class ShpAdminShape():
 		if self.type==POLYGON_TYPE_SHP or self.type==POLYLINE_TYPE_SHP:
 			self.partlist=shape.partlist
 			self.pointlist=shape.pointlist
-			self.mb=shape.mbr
+			self.mbr=shape.mbr
 			self.partscount=shape.partscount
 			self.pointscount=shape.pointscount
 			self.draworderlist=[0]*self.partscount
@@ -4661,8 +4841,10 @@ class ShpAdminShape():
 		for i in range(partindex+1,self.partscount):
 			self.partlist[i]-=delta
 		self.pointscount-=delta
+	def printparts(self,file=sys.stderr): return Shape.printparts(self,file=file)
 	def getmbr(self,partindices): return Shape.getmbr(self,partindices)
 	def getcenter(self,partindices): return Shape.getcenter(self,partindices)
+	def setdraworder(self,partidx,draworder): return Shape.setdraworder(self,partidx,draworder)
 	def hasdraworder(self,draworder):
 		has=False
 		hasmore=False
@@ -4751,6 +4933,17 @@ class ShpAdminShapeIntersection():
 		points=[]
 		for p in pg.points: points.append(p.clone())
 		self.pointslist.append(points)
+	def addfromplus(self,plus):
+		pg=plus.polygons[0]
+		self.addpolygon(pg)
+	def addfromshapes(self,shapes,draworder):
+		for shape in shapes:
+			(has,_)=shape.hasdraworder(draworder)
+			if not has: continue
+			pluses=ShapePlus.make(shape)
+			for plus in pluses:
+				if plus.draworder!=draworder: continue
+				self.addfromplus(plus)
 	def clearside(self):
 		for points in self.pointslist:
 			for p in points: p.side=-1
@@ -4819,27 +5012,19 @@ class ShpAdmin():
 			nickname=r['sov3']+'.'+r['adm3']
 			self.addshape(self.admin0shp.shapes[i],nickname)
 		self.islakesloaded=False
+		self.isdisputedloaded=False
+	def other_addshape(self,shapes,bynickname,shape,nickname):
+		sas=ShpAdminShape(shape,nickname)
+		bynickname[nickname]=sas
+		shapes.append(sas)
 	def addshape(self,shape,nickname):
-		sas=ShpAdminShape(shape,nickname)
-		self.bynickname[nickname]=sas
-		self.shapes.append(sas)
-	def lakes_addshape(self,shape,nickname):
-		sas=ShpAdminShape(shape,nickname)
-		self.lakes_bynickname[nickname]=sas
-		self.lakes_shapes.append(sas)
+		self.other_addshape(self.shapes,self.bynickname,shape,nickname)
 	def setdraworder(self,index,partidx,draworder):
 		shape=self.shapes[index]
-		if partidx<0:
-			shape.draworder=draworder
-			if hasattr(shape,'draworderlist'):
-				for i in range(len(shape.draworderlist)):
-					shape.draworderlist[i]=draworder
-		else:
-			if partidx<shape.partscount:
-				shape.draworderlist[partidx]=draworder
+		shape.setdraworder(partidx,draworder)
 	def resetdraworder(self):
-		for i in range(len(self.shapes)):
-			self.setdraworder(i,-1,0)
+		for shape in self.shapes:
+			shape.setdraworder(-1,0)
 	def getcenter(self,index,partindices):
 		return Shp.getcenter(self,index,partindices)
 	def setccwtypes(self):
@@ -4871,6 +5056,15 @@ class ShpAdmin():
 			rus.fixrussia(0,3) # this is for nolakes, lakes is probably 0,5
 			rus.ccwtypes[0]=CW_CCWTYPE
 		else: raise ValueError
+	def makecyprusfull(self):
+		nickname='_cyprusfull'
+		names=['CYP.CYP','CNM.CNM','CYN.CYN']
+		sc=ShapeCompress(-1)
+		for n in names:
+			if not n in self.bynickname: continue
+			sc.addshape(self.bynickname[n])
+		shape=sc.exportshape()
+		self.addshape(shape,nickname)
 	def loadlakes(self):
 		if self.islakesloaded: return
 		if isverbose_global: print('Loading lakes data (%s)'%self.scale,file=sys.stderr)
@@ -4892,7 +5086,7 @@ class ShpAdmin():
 		for i in range(self.lakes_dbf.numrecords):
 			r=self.lakes_dbf.records[i]
 			nickname=r['name']
-			self.lakes_addshape(self.lakes_shp.shapes[i],nickname)
+			self.other_addshape(self.lakes_shapes,self.lakes_bynickname,self.lakes_shp.shapes[i],nickname)
 		if self.lakes_dbf.numrecords==275 and self.scale=='50m':
 			nickpairs=((266,'_deadseasouth'),)
 			for np in nickpairs:
@@ -4909,6 +5103,33 @@ class ShpAdmin():
 			pluses=ShapePlus.make(shape)
 			for plus in pluses: ret.append(plus)
 		return ret
+	def loaddisputed(self):
+		if self.isdisputedloaded: return
+		if isverbose_global: print('Loading disputed data (%s)'%self.scale,file=sys.stderr)
+		self.isdisputedloaded=True
+		self.disputed_ifile=install.getinstallfile('admin0-disputed.shp',[self.scale])
+		if not self.disputed_ifile:
+			print('Couldn\'t find admin0 disputed file (%s)'%self.scale,file=sys.stderr)
+			raise ValueError
+		self.disputed_shp=Shp(self.disputed_ifile.filename,self.disputed_ifile)
+		self.disputed_shp.loadshapes()
+		self.disputed_shapes=[]
+		self.disputed_bynickname={}
+
+		self.disputed_dbf=Dbf(install.getfilename('admin0-disputed.dbf',[self.scale]))
+		if isverbose_global: print('Loading disputed dbf data (%s)'%self.scale,file=sys.stderr)
+		self.disputed_dbf.selectcfield('BRK_NAME','name')
+		self.disputed_dbf.loadrecords()
+
+		for i in range(self.disputed_dbf.numrecords):
+			r=self.disputed_dbf.records[i]
+			nickname=r['name']
+			self.other_addshape(self.disputed_shapes,self.disputed_bynickname,self.disputed_shp.shapes[i],nickname)
+	def selectdisputed(self,names,draworder):
+		self.loaddisputed()
+		for n in names:
+			shape=self.disputed_bynickname[n]
+			shape.setdraworder(-1,draworder)
 	
 def sphere2_test(): # test ShpAdmin
 	output=Output()
@@ -4950,6 +5171,73 @@ def sphere2_test(): # test ShpAdmin
 	if False:
 		dll=DegLonLat(-82.5,42.5)
 		dll_sphere_print_svg(output,dll,rotation,width,height,'c4',boxzoomcleave=bzc)
+
+	print_footer_svg(output)
+
+def disputed_test(): # find disputed shapes
+	output=Output()
+	width=1000
+	height=1000
+	rotation=SphereRotation()
+	scale='50m'
+
+	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
+	admin0.fixantarctica()
+	admin0.fixrussia()
+	admin0.setccwtypes()
+	admin0.loaddisputed()
+
+	names=[
+		'Arunachal Pradesh', # india and china
+		'Tirpani Valleys', # india and china, border
+		'Bara Hotii Valleys', # india and china, border
+		'Demchok', # kashmir and china, border, redundant
+		'Samdu Valleys', # india and china, border
+		'Jammu and Kashmir', # india and pakistan and china, kashmir
+		'Shaksam Valley', # india pakistan and china
+		'Aksai Chin', # india and china
+		'Northern Areas', # pakistan and india and china, north of kashmir
+		'Abyei', # sudan and southsudan
+		'Lawa Headwaters', # suriname and france
+		'Courantyne Headwaters', # guyana and suriname
+		'Golan Heights', # israel and lebanon
+		'Ilemi Triangle', # kenya and south sudan
+		'W. Sahara', # w sahara and morocco
+		'N. Cyprus', # north cyprus separatists
+		'Kuril Is.', # japan and russia
+		'Somaliland', # somaliland and somalia
+		'Abkhazia', # georgia separatists
+		'Transnistria', # moldova separatists
+		'South Ossetia', # georgia separatists
+		'Nagorno-Karabakh', # azerbaijan separatists
+		'Siachen Glacier', # pakistan and india
+		'Crimea', # ukraine and russia
+		'Donbass' # ukraine separatists
+		]
+	name=names[24]
+	scale=4
+	print('Inspecting %s'%name,file=sys.stderr)
+
+	disputed=admin0.disputed_bynickname[name]
+
+	(lon,lat)=disputed.getcenter([-1])
+	rotation.set_deglonlat(lon,lat)
+	if scale==1:
+		bzc=None
+		print_header_svg(output,width,height,['sl','sp','debugl','debuggreen','c4','sw','sr','sb'],isgradients=True)
+		print_roundwater_svg(output,width)
+	else:
+		boxd=1/scale
+		boff=-int(scale*width/2)+int(width/2)
+		shift=Shift(boff,boff)
+		bzc=BoxZoomCleave(scale,-boxd,boxd,-boxd,boxd,shift)
+		print_header_svg(output,width,height,['sl','sp','debugl','debuggreen','c4','sw','sr','sb'])
+
+	for one in admin0.shapes:
+		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull='sl',csspatch='sp',
+				boxzoomcleave=bzc)
+	one_sphere_print_svg(output,disputed,0,rotation,width,height,8,cssfull='debuggreen',csspatch='sp',
+			boxzoomcleave=bzc)
 
 	print_footer_svg(output)
 
@@ -5518,8 +5806,12 @@ def locatormap(output,overrides):
 	options['fullm']='10m'
 	options['splitlimit']=4
 	options['isfullhighlight']=False
+	options['isdisputed']=False
 
-	options['comment']=dicttostr('settings',overrides)
+	if True:
+		pub=dict(overrides)
+		if 'copyright' in pub: del pub['copyright']
+		options['comment']=dicttostr('settings',pub)
 	for n in overrides: options[n]=overrides[n]
 
 	full_admin0=ShpAdmin('admin0-nolakes.shp',[options['fullm']])
@@ -5610,7 +5902,191 @@ def locatormap(output,overrides):
 	getmoption(options,'partindices','fullm','full_partindices')
 	getmoption(options,'partindices','zoomm','zoom_partindices')
 
+	if 'disputed' in options or 'disputed_border' in options:
+		options['isdisputed']=True
+		if not 'disputed' in options: options['disputed']=[]
+		if not 'disputed_border' in options: options['disputed_border']=[]
+
 	combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0)
+
+def euromap(output,overrides):
+	options={}
+	options['comment']=''
+	options['copyright']=''
+	options['width']=1000
+	options['height']=1000
+	options['islakes']=True
+	options['spherem']='10m'
+	options['splitlimit']=4
+	options['labelfont']='14px sans'
+	options['gsgs']=None
+	options['borderlakes']=[]
+	options['ispartlabels']=False
+	options['euromapdots_50m']=None
+	allowedoverrides=['comment','copyright','width','height','islakes','spherem','splitlimit','labelfont','gsgs','borderlakes',
+			'ispartlabels','euromapdots_50m']
+	publicoverrides=['comment','width','height','islakes','spherem','splitlimit','labelfont','gsg','gsgs','borderlakes',
+			'ispartlabels','euromapdots_50m']
+
+	if 'gsg' in overrides: options['gsgs']=[overrides['gsg']]
+	if True:
+		pub={}
+		for n in overrides:
+			 if n in publicoverrides: pub[n]=overrides[n]
+		options['comment']=dicttostr('settings',pub)
+
+	for n in overrides:
+		 if n in allowedoverrides: options[n]=overrides[n]
+
+	width=options['width']
+	height=options['height']
+	splitlimit=options['splitlimit']
+	moredots=options['euromapdots_50m']
+	rotation=SphereRotation()
+
+	admin0=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
+	admin0.fixantarctica()
+	admin0.fixrussia()
+	admin0.makecyprusfull()
+	admin0.setccwtypes()
+	admin0.loadlakes()
+
+	(lon,lat)=admin0.bynickname['DEU.DEU'].getcenter([-1])
+	rotation.set_deglonlat(lon-6,lat)
+
+	zoomscale=2
+	boxd=1/zoomscale
+	boff=-int(zoomscale*width/2)+int(width/2)
+	shift=Shift(boff,boff)
+	bzc=BoxZoomCleave(zoomscale,-boxd,boxd,-boxd,boxd,shift)
+
+	cc=None
+
+# Austria Belgium Bulgaria Croatia Cyprus(whole) Czech Denmark Estonia Finland France
+# Germany Greece Hungary Ireland Italy Latvia Lithuania Luxembourg Malta Netherlands Poland Portugal
+# Romania Slovakia Slovenia Spain Sweden
+
+	eugsgs=['AUT.AUT','BEL.BEL','BGR.BGR','HRV.HRV','_cyprusfull','CZE.CZE','DN1.DNK','EST.EST','FI1.FIN','FR1.FRA',
+			'DEU.DEU','GRC.GRC','HUN.HUN','IRL.IRL','ITA.ITA','LVA.LVA','LTU.LTU','LUX.LUX','MLT.MLT','NL1.NLD','POL.POL','PRT.PRT',
+			'ROU.ROU','SVK.SVK','SVN.SVN','ESP.ESP','SWE.SWE']
+# 'CYP.CYP','CYN.CYN','CNM.CNM'
+	for gsg in eugsgs:
+		admin0.bynickname[gsg].setdraworder(-1,1)
+	for gsg in ['AND.AND','CHE.CHE']:
+		admin0.bynickname[gsg].setdraworder(-1,2)
+
+	eu_wc=WorldCompress(admin0,-1,source_draworder=1)
+	eu_wc.addeuro()
+	other_wc=WorldCompress(admin0,-1)
+	other_wc.addafrica()
+	other_wc.addmiddleeast()
+
+	css=['sl','sp','sb','al','ap','ab','sw','sr']
+
+	if moredots:
+		m=['c1','w1']
+		for c in m: css.append(c)
+
+	if options['gsgs']:
+		for gsg in options['gsgs']:
+			if gsg in admin0.bynickname: admin0.bynickname[gsg].setdraworder(-1,3)
+			else: print('Skipping gsg:%s, not found in %s'%(gsg,options['spherem']),file=sys.stderr)
+		css.append('sh')
+		css.append('sq')
+
+	euborderlakeshapes=[]
+	if 'EST.EST' not in options['gsgs']: 
+		euborderlakes=['Pskoyskoye Ozero', 'Lake Peipus']
+		sasi=ShpAdminShapeIntersection()
+		pluses=eu_wc.getpluses(isnegatives=False,isoverlaps=False)
+		for plus in pluses:
+			sasi.addfromplus(plus)
+		for n in euborderlakes:
+			l=admin0.lakes_bynickname[n]
+			if not l:
+				print('Border lake (%s) not found: %s'%(options['spherem'],n),file=sys.stderr)
+				continue
+			sasi.setinside(l)
+		euborderlakeshapes=sasi.exportlines()
+
+	gsgborderlakeshapes=[]
+	if True:
+		sasi=ShpAdminShapeIntersection()
+		sasi.addfromshapes(admin0.shapes,3)
+		for n in options['borderlakes']:
+			l=admin0.lakes_bynickname[n]
+			if not l:
+				print('Border lake (%s) not found: %s'%(options['spherem'],n),file=sys.stderr)
+				continue
+			sasi.setinside(l)
+		gsgborderlakeshapes=sasi.exportlines()
+		if len(gsgborderlakeshapes): css.append('si')
+
+	print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']])
+	print_squarewater_svg(output,width)
+
+	for one in admin0.shapes:
+		one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
+				boxzoomcleave=bzc,cornercleave=cc)
+
+	pluses=other_wc.getpluses(isnegatives=False,isoverlaps=False)
+	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sl',csspatch='sp',boxzoomcleave=bzc)
+
+	pluses=eu_wc.getpluses(isnegatives=False,isoverlaps=False)
+	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='al',csspatch='ap',boxzoomcleave=bzc)
+
+	for one in admin0.shapes:
+		one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
+				boxzoomcleave=bzc,cornercleave=cc)
+
+	for one in admin0.shapes:
+		one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='al',csspatch='ap',
+				boxzoomcleave=bzc,cornercleave=cc)
+
+	for one in admin0.shapes:
+		one_sphere_print_svg(output,one,3,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',
+				boxzoomcleave=bzc,cornercleave=cc,islabels=options['ispartlabels'])
+
+	if True:
+		negatives=eu_wc.getnegatives()
+		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
+		negatives=other_wc.getnegatives()
+		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
+
+	if True:
+		pluses=admin0.getlakes()
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
+
+	if True:
+		pluses=other_wc.getpluses(ispositives=False,isoverlaps=True)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='sb',boxzoomcleave=bzc)
+		pluses=eu_wc.getpluses(ispositives=False,isoverlaps=True)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='ab',boxzoomcleave=bzc)
+
+	for plus in euborderlakeshapes:
+		if plus.type!=POLYLINE_TYPE_SHP: continue
+		oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='sb',boxzoomcleave=bzc)
+	for plus in gsgborderlakeshapes:
+		if plus.type!=POLYLINE_TYPE_SHP: continue
+		oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si',boxzoomcleave=bzc)
+
+	if moredots:
+		for dots in moredots:
+			gsg=dots[0]
+			shape=admin0.bynickname[gsg]
+			sds=int((dots[1]*width)/1000)
+			isw=dots[2]
+			smalldots=dots[3]
+			cssclass='c1'
+			if isinstance(isw,bool) and isw: cssclass='c4'
+			elif isw==1: cssclass='c1'
+			elif isw==2: cssclass='c2'
+			elif isw==3: cssclass='c3'
+			elif isw==4: cssclass='c4'
+			cssclass2='w'+cssclass[1]
+			print_zoomdots_svg(output,shape,smalldots,sds,cssclass,cssclass2,rotation,width,height,boxzoomcleave=bzc)
+
+	print_footer_svg(output)
 
 
 def indonesia_options():
@@ -5656,16 +6132,65 @@ def cyprus_options():
 	options['moredots_10m']=[ (30,3,[2]) ]
 	return options
 
+def cyprus_disputed_options():
+	options=cyprus_options()
+	options['disputed']=['N. Cyprus']
+	return options
+
+def cyprusfull_options():
+	options={'gsgs':['_cyprusfull'],'isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Cyprus locator'}
+	options['iszoom']=True
+	options['zoomscale']=5
+	options['moredots_50m']=[ (30,3,[0]) ]
+	options['euromapdots_50m']= [('_cyprusfull',24,False,[0]) ]
+#	options['ispartlabels']=True
+	return options
+
 def india_options():
 	options={'gsg':'IND.IND','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':55,'title':'India locator'}
 	options['moredots_10m']=[ (4,False,[2,3,4,5,6,7,8,9,17]), (45,False,[21]) ]
 #	options['ispartlabels']=True
 	return options
 
+def india_disputed_options():
+	options=india_options()
+	d=[]
+	db=[]
+	d.append('Arunachal Pradesh') # india and china
+	db.append('Tirpani Valleys') # india and china, border
+	db.append('Bara Hotii Valleys') # india and china, border
+	db.append('Demchok') # kashmir and china, border, redundant
+	db.append('Samdu Valleys') # india and china, border
+	d.append('Jammu and Kashmir') # india and pakistan and china, kashmir
+	d.append('Shaksam Valley') # india pakistan and china
+	d.append('Aksai Chin') # india and china
+	d.append('Northern Areas') # pakistan and india and china, north of kashmir
+	d.append('Siachen Glacier') # pakistan and india
+	options['disputed']=d
+	options['disputed_border']=db
+	return options
+
 def china_options():
 	options={'gsg':'CH1.CHN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':165,'title':'China locator'}
 	options['moredots_10m']=[ (4,False,[32,33,42,43,44,45,69]) ]
 #	options['ispartlabels']=True
+	return options
+
+def china_disputed_options():
+	options=china_options()
+	db=[]
+	d=[]
+	d.append('Arunachal Pradesh') # india and china
+	db.append('Tirpani Valleys') # india and china, border
+	db.append('Bara Hotii Valleys') # india and china, border
+	db.append('Demchok') # kashmir and china, border, redundant
+	db.append('Samdu Valleys') # india and china, border
+	d.append('Jammu and Kashmir') # india and pakistan and china, kashmir
+	d.append('Shaksam Valley') # india pakistan and china
+	d.append('Aksai Chin') # india and china
+	d.append('Northern Areas') # pakistan and india and china, north of kashmir
+	options['disputed']=d
+	options['disputed_border']=db
 	return options
 
 def israel_options():
@@ -5675,6 +6200,11 @@ def israel_options():
 	options['zoomscale']=5
 	options['moredots_10m']=[ (30,True,[0]) ]
 	options['borderlakes']=['Dead Sea','_deadseasouth']
+	return options
+
+def israel_disputed_options():
+	options=israel_options()
+	options['disputed']=['Golan Heights']
 	return options
 
 def palestine_options():
@@ -5694,6 +6224,11 @@ def lebanon_options():
 	options['moredots_10m']=[ (30,True,[0]) ]
 	return options
 
+def lebanon_disputed_options():
+	options=lebanon_options()
+	options['disputed']=['Golan Heights']
+	return options
+
 def ethiopia_options():
 	options={'gsg':'ETH.ETH','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':-25,'title':'Ethiopia locator'}
 	options['borderlakes']=['Lake Turkana']
@@ -5703,8 +6238,18 @@ def southsudan_options():
 	options={'gsg':'SDS.SDS','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'South Sudan locator'}
 	return options
 
+def southsudan_disputed_options():
+	options=southsudan_options()
+	options['disputed']=['Abyei', 'Ilemi Triangle']
+	return options
+
 def somalia_options():
 	options={'gsg':'SOM.SOM','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,'title':'Somalia locator'}
+	return options
+
+def somalia_disputed_options():
+	options=somalia_options()
+	options['disputed']=['Somaliland']
 	return options
 
 def kenya_options():
@@ -5712,8 +6257,23 @@ def kenya_options():
 	options['borderlakes']=['Lake Victoria','Lake Turkana']
 	return options
 
+def kenya_disputed_options():
+	options=kenya_options()
+	options['disputed']=['Ilemi Triangle']
+	return options
+
 def pakistan_options():
 	options={'gsg':'PAK.PAK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Pakistan locator'}
+	return options
+
+def pakistan_disputed_options():
+	options=pakistan_options()
+	d=[]
+	d.append('Jammu and Kashmir') # india and pakistan and china, kashmir
+	d.append('Shaksam Valley') # india pakistan and china
+	d.append('Northern Areas') # pakistan and india and china, north of kashmir
+	d.append('Siachen Glacier') # pakistan and india
+	options['disputed']=d
 	return options
 
 def malawi_options():
@@ -5739,20 +6299,40 @@ def france_options():
 	options={'gsg':'FR1.FRA','isinsetleft':True,'lonlabel_lat':21,'latlabel_lon':-30,'title':'France locator'}
 	options['iszoom']=True
 	options['issubland']=False
-	options['partindices_10m']=[1,11,12,13,14,15,16,17,18,21]
-	options['partindices_110m']=[1,2]
-	options['partindices_50m']=[0,1,2]
-	options['tripelboxes']=[options['partindices_10m']]
-	options['centerindices_10m']=options['partindices_10m']
-#	options['ispartlabels']=True
+	europarts_10m=[1,11,12,13,14,15,16,17,18,21]
+	options['tripelboxes']=[[0],[3,4,5,6,7,19,20],[8,9,10],europarts_10m]
+	options['centerindices_10m']=europarts_10m
+
+#	options['isfullpartlabels']=True
+	return options
+
+def france_disputed_options():
+	options={'gsg':'FR1.FRA','isinsetleft':True,'lonlabel_lat':21,'latlabel_lon':-30,'title':'France locator'}
+	options['disputed']=['Lawa Headwaters']
+	europarts_10m=[1,11,12,13,14,15,16,17,18,21]
+	options['tripelboxes']=[[0],[3,4,5,6,7,19,20],[8,9,10],europarts_10m]
+	options['centerindices_10m']=[0]
+	options['iszoom']=True
+	options['iszoom34']=True
+	options['zoomscale']=4
 	return options
 
 def suriname_options():
 	options={'gsg':'SUR.SUR','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Suriname locator'}
 	return options
 
+def suriname_disputed_options():
+	options=suriname_options()
+	options['disputed']=['Lawa Headwaters','Courantyne Headwaters']
+	return options
+
 def guyana_options():
 	options={'gsg':'GUY.GUY','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Guyana locator'}
+	return options
+
+def guyana_disputed_options():
+	options=guyana_options()
+	options['disputed']=['Courantyne Headwaters']
 	return options
 
 def southkorea_options():
@@ -5767,8 +6347,18 @@ def morocco_options():
 	options={'gsg':'MAR.MAR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Morocco locator'}
 	return options
 
+def morocco_disputed_options():
+	options=morocco_options()
+	options['disputed']=['W. Sahara']
+	return options
+
 def westernsahara_options():
 	options={'gsg':'SAH.SAH','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Western Sahara locator'}
+	return options
+
+def westernsahara_disputed_options():
+	options=westernsahara_options()
+	options['disputed']=['W. Sahara']
 	return options
 
 def costarica_options():
@@ -5796,6 +6386,13 @@ def bhutan_options():
 
 def ukraine_options():
 	options={'gsg':'UKR.UKR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Ukraine locator'}
+	return options
+
+def ukraine_disputed_options():
+	options=ukraine_options()
+	options['disputed']=['Crimea','Donbass']
+	options['iszoom']=True
+	options['iszoom34']=True
 	return options
 
 def belarus_options():
@@ -5875,6 +6472,12 @@ def russia_options():
 	options['borderlakes']=['Pskoyskoye Ozero', 'Lake Peipus','Aral Sea']
 	return options
 
+def russia_disputed_options():
+	options=russia_options()
+	options['disputed']=['Crimea']
+	options['disputed_border']=['Kuril Is.']
+	return options
+
 def czechia_options():
 	options={'gsg':'CZE.CZE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Czechia locator'}
 	return options
@@ -5925,6 +6528,7 @@ def luxembourg_options():
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['moredots_10m']=[ (30,True,[0]) ]
+	options['euromapdots_50m']= [('LUX.LUX',24,False,[0]) ]
 	return options
 
 def unitedarabemirates_options():
@@ -5942,6 +6546,11 @@ def belgium_options():
 def georgia_options():
 	options={'gsg':'GEO.GEO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,'title':'Georgia locator'}
 	options['iszoom']=True
+	return options
+
+def georgia_disputed_options():
+	options=georgia_options()
+	options['disputed']=['Abkhazia','South Ossetia']
 	return options
 
 def macedonia_options():
@@ -5963,6 +6572,11 @@ def azerbaijan_options():
 	options['iszoom']=True
 	return options
 
+def azerbaijan_disputed_options():
+	options=azerbaijan_options()
+	options['disputed']=['Nagorno-Karabakh']
+	return options
+
 def kosovo_options():
 	options={'gsg':'KOS.KOS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Kosovo locator'}
 	options['iszoom']=True
@@ -5977,6 +6591,8 @@ def turkey_options():
 def spain_options():
 	options={'gsg':'ESP.ESP','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Spain locator'}
 	options['moredots_10m']=[(10,False,[1]),(24,False,[5])]
+	options['euromapdots_50m']=[('ESP.ESP',56,False,[5])]
+#	options['ispartlabels']=True
 	return options
 
 def laos_options():
@@ -6070,6 +6686,11 @@ def centralafricanrepublic_options():
 
 def sudan_options():
 	options={'gsg':'SDN.SDN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Sudan locator'}
+	return options
+
+def sudan_disputed_options():
+	options=sudan_options()
+	options['disputed']=['Abyei']
 	return options
 
 def djibouti_options():
@@ -6379,7 +7000,10 @@ def paraguay_options():
 
 def portugal_options():
 	options={'gsg':'PRT.PRT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Portugal locator'}
-	options['smalldots']=[2,3,5,6,7,8,9,10,11,12,13,14,15]
+#	options['smalldots']=[2,3,5,6,7,8,9,10,11,12,13,14,15]
+	options['moredots_10m']=[(4,False,(2,3,5,6,7,8,9,10,11,12,13,14,15))]
+	options['euromapdots_50m']= [('PRT.PRT',24,False,[0]), ('PRT.PRT',82,False,[4]) ]
+#	options['ispartlabels']=True
 	return options
 
 def moldova_options():
@@ -6387,6 +7011,11 @@ def moldova_options():
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
+	return options
+
+def moldova_disputed_options():
+	options=moldova_options()
+	options['disputed']=['Transnistria']
 	return options
 
 def turkmenistan_options():
@@ -6708,6 +7337,11 @@ def taiwan_options():
 def japan_options():
 	options={'gsg':'JPN.JPN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Japan locator'}
 	options['smalldots_10m']=[ 60,80, 14, 62, 12, 59, 61, 54, 84, 66, 67, 16]
+	return options
+
+def japan_disputed_options():
+	options=japan_options()
+	options['disputed_border']=['Kuril Is.']
 	return options
 
 def saintpierreandmiquelon_options():
@@ -7055,6 +7689,8 @@ def malta_options():
 	options['zoomscale']=5
 	options['iszoom34']=True
 	options['moredots_10m']=[ (30,4,[0]) ]
+	options['euromapdots_50m']= [('MLT.MLT',24,False,[0]) ]
+#	options['ispartlabels']=True
 	return options
 
 def jersey_options():
@@ -7430,34 +8066,50 @@ def addregionoptions(dest):
 	dest.append( ('argentina',argentina_options) )
 	dest.append( ('dhekelia',dhekelia_options) )
 	dest.append( ('cyprus',cyprus_options) )
+	dest.append( ('cyprus_disputed',cyprus_disputed_options) )
+	dest.append( ('cyprusfull',cyprusfull_options) )
 	dest.append( ('india',india_options) )
+	dest.append( ('india_disputed',india_disputed_options) )
 	dest.append( ('china',china_options) )
+	dest.append( ('china_disputed',china_disputed_options) )
 
 	dest.append( ('israel',israel_options) )
+	dest.append( ('israel_disputed',israel_disputed_options) )
 	dest.append( ('palestine',palestine_options) )
 	dest.append( ('lebanon', lebanon_options) )
+	dest.append( ('lebanon_disputed', lebanon_disputed_options) )
 	dest.append( ('ethiopia', ethiopia_options) )
 	dest.append( ('southsudan', southsudan_options) )
+	dest.append( ('southsudan_disputed', southsudan_disputed_options) )
 	dest.append( ('somalia', somalia_options) )
+	dest.append( ('somalia_disputed', somalia_disputed_options) )
 	dest.append( ('kenya', kenya_options) )
+	dest.append( ('kenya_disputed', kenya_disputed_options) )
 	dest.append( ('pakistan', pakistan_options) )
+	dest.append( ('pakistan_disputed', pakistan_disputed_options) )
 	dest.append( ('malawi', malawi_options) )
 	dest.append( ('unitedrepublicoftanzania', unitedrepublicoftanzania_options) )
 	dest.append( ('syria', syria_options) )
 	dest.append( ('somaliland', somaliland_options) )
 	dest.append( ('france', france_options) )
+	dest.append( ('france_disputed', france_disputed_options) )
 	dest.append( ('suriname', suriname_options) )
+	dest.append( ('suriname_disputed', suriname_disputed_options) )
 	dest.append( ('guyana', guyana_options) )
+	dest.append( ('guyana_disputed', guyana_disputed_options) )
 	dest.append( ('southkorea', southkorea_options) )
 	dest.append( ('northkorea', northkorea_options) )
 	dest.append( ('morocco', morocco_options) )
+	dest.append( ('morocco_disputed', morocco_disputed_options) )
 	dest.append( ('westernsahara', westernsahara_options) )
+	dest.append( ('westernsahara_disputed', westernsahara_disputed_options) )
 	dest.append( ('costarica', costarica_options) )
 	dest.append( ('nicaragua', nicaragua_options) )
 	dest.append( ('republicofthecongo', republicofthecongo_options) )
 	dest.append( ('democraticrepublicofthecongo', democraticrepublicofthecongo_options) )
 	dest.append( ('bhutan', bhutan_options) )
 	dest.append( ('ukraine', ukraine_options) )
+	dest.append( ('ukraine_disputed', ukraine_disputed_options) )
 	dest.append( ('belarus', belarus_options) )
 	dest.append( ('namibia', namibia_options) )
 	dest.append( ('southafrica', southafrica_options) )
@@ -7473,6 +8125,7 @@ def addregionoptions(dest):
 	dest.append( ('uruguay', uruguay_options) )
 	dest.append( ('mongolia', mongolia_options) )
 	dest.append( ('russia', russia_options) )
+	dest.append( ('russia_disputed', russia_disputed_options) )
 	dest.append( ('czechia', czechia_options) )
 	dest.append( ('germany', germany_options) )
 	dest.append( ('estonia', estonia_options) )
@@ -7486,9 +8139,11 @@ def addregionoptions(dest):
 	dest.append( ('unitedarabemirates', unitedarabemirates_options) )
 	dest.append( ('belgium', belgium_options) )
 	dest.append( ('georgia', georgia_options) )
+	dest.append( ('georgia_disputed', georgia_disputed_options) )
 	dest.append( ('macedonia', macedonia_options) )
 	dest.append( ('albania', albania_options) )
 	dest.append( ('azerbaijan', azerbaijan_options) )
+	dest.append( ('azerbaijan_disputed', azerbaijan_disputed_options) )
 	dest.append( ('kosovo', kosovo_options) )
 	dest.append( ('turkey', turkey_options) )
 	dest.append( ('spain', spain_options) )
@@ -7511,6 +8166,7 @@ def addregionoptions(dest):
 	dest.append( ('liberia', liberia_options) )
 	dest.append( ('centralafricanrepublic', centralafricanrepublic_options) )
 	dest.append( ('sudan', sudan_options) )
+	dest.append( ('sudan_disputed', sudan_disputed_options) )
 	dest.append( ('djibouti', djibouti_options) )
 	dest.append( ('eritrea', eritrea_options) )
 	dest.append( ('austria', austria_options) )
@@ -7565,6 +8221,7 @@ def addregionoptions(dest):
 	dest.append( ('paraguay', paraguay_options) )
 	dest.append( ('portugal', portugal_options) )
 	dest.append( ('moldova', moldova_options) )
+	dest.append( ('moldova_disputed', moldova_disputed_options) )
 	dest.append( ('turkmenistan', turkmenistan_options) )
 	dest.append( ('jordan', jordan_options) )
 	dest.append( ('nepal', nepal_options) )
@@ -7611,6 +8268,7 @@ def addregionoptions(dest):
 	dest.append( ('turksandcaicosislands', turksandcaicosislands_options) )
 	dest.append( ('taiwan', taiwan_options) )
 	dest.append( ('japan', japan_options) )
+	dest.append( ('japan_disputed', japan_disputed_options) )
 	dest.append( ('saintpierreandmiquelon', saintpierreandmiquelon_options) )
 	dest.append( ('iceland', iceland_options) )
 	dest.append( ('pitcairnislands', pitcairnislands_options) )
@@ -7689,6 +8347,8 @@ def runparams(params):
 	regionoptions=[]
 	addregionoptions(regionoptions)
 	overrides['cmdline']='./pythonshp.py '+' '.join(params)
+	locatormap_overrides={}
+	areamap_overrides={}
 
 	for param in params:
 		if param=='check':
@@ -7703,22 +8363,32 @@ def runparams(params):
 			regionoptions.sort()
 			for l in regionoptions: print('%s'%l[0])
 		elif param=='wiki1':
-			overrides['width']=1000
-			overrides['height']=1000
-			overrides['labelfont']='14px sans'
-			overrides['spherem']='50m'
-			overrides['zoomm']='50m'
+			locatormap_overrides['width']=1000
+			locatormap_overrides['height']=1000
+			locatormap_overrides['labelfont']='14px sans'
+			locatormap_overrides['spherem']='50m'
+			locatormap_overrides['zoomm']='50m'
+			areamap_overrides['width']=1000
+			areamap_overrides['height']=1000
+			areamap_overrides['spherem']='50m'
 		elif param=='notripel':
-			overrides['istripelinset']=False
+			locatormap_overrides['istripelinset']=False
 		elif param=='bg':
 			overrides['bgcolor']='#b4b4b4'
 		elif param=='locatormap':
 			for n in overrides: options[n]=overrides[n]
+			for n in locatormap_overrides: options[n]=locatormap_overrides[n]
 			locatormap(output,options)
+		elif param=='euromap':
+			for n in overrides: options[n]=overrides[n]
+			for n in areamap_overrides: options[n]=areamap_overrides[n]
+			euromap(output,options)
 		elif param=='admin0dbf_test': admin0dbf_test()
 		elif param=='lakesdbf_test': lakesdbf_test()
 		elif param=='lakesintersection_test': lakesintersection_test()
 		elif param=='borderlakes_test': borderlakes_test()
+		elif param=='disputeddbf_test': disputeddbf_test()
+		elif param=='disputed_test': disputed_test()
 		elif param=='admin1dbf_test': admin1dbf_test()
 		elif param=='sphere_test': sphere_test()
 		elif param=='sphere2_test': sphere2_test()
@@ -7736,20 +8406,23 @@ def runparams(params):
 		elif param=='admin0parts_test': admin0parts_test()
 		elif param=='worldcompress_test': worldcompress_test()
 		elif param=='ccw_test': ccw_test()
-		elif param=='help':
+		elif param=='version' or param=='--version':
+			print('Version 1.0.0')
+		elif param=='help' or param=='--help':
 			print('Usage: ./pythonshp.py command1 command2 command3 ...')
 			print('Commands:')
 			print('\tverbose          : print more status messages')
 			print('\tcheck            : show file locations and enable verbose messages')
 			print('\tpublicdomain     : add PD copyright notice in output')
 			print('\twiki1            : set defaults for wikipedia, set 1')
-			print('\tbg               : print background color')
+			print('\tbg               : print background color (instead of transparency)')
 			print('\tnotripel         : disable Winkel Tripel inset')
 			print('\tlist             : list known location commands')
 			print('\tlocatormap       : print locator map svg')
-			print('Example 0: "./pythonshp.py verbose check"')
-			print('Example 1: "./pythonshp.py check publicdomain wiki laos locatormap > laos.svg"')
-			print('Example 2: "./pythonshp.py verbose wiki laos locatormap | inkscape -e laos.png -"')
+			print('\teuromap          : print EU map svg')
+			print('Example 1: "./pythonshp.py verbose check"')
+			print('2: "./pythonshp.py check publicdomain wiki1 laos locatormap > laos.svg"')
+			print('3: "./pythonshp.py verbose wiki1 laos locatormap | inkscape -e laos.png -"')
 		else:
 			for l in regionoptions:
 				if param==l[0]:
