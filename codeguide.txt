@@ -94,12 +94,15 @@ options['latlabel_lon'] = int
 options['islakes'] = bool
 	Should lakes be drawn? They look good. Default is True.
 
+OBSOLETE:
 options['borderlakes'] = array of strings
 	This specifies the names of lakes that overlap the region's border. This
 setting will draw the region's border over the specified lakes. Without
 this setting, lakes will hide the border if the region is highlighted.
 E.g. (Malawi)
 	options['borderlakes']=['Lake Malawi']
+	OBSOLETE: This is no longer used. Now, all lakes are checked in all
+cases. This only adds a few seconds to runtime.
 
 options['title'] = string
 	This is unreferenced but it is inserted in the svg header in a comment, to
@@ -123,11 +126,12 @@ defines them in 110m.
 is a good choice) rather than using 'moredots'.
 
 options['zoomdots'] = array of 3-tuples, a la options['moredots']
+options['zoomdots_10m'] = array of 3-tuples, a la options['moredots']
+options['zoomdots_50m'] = array of 3-tuples, a la options['moredots']
+options['zoomdots_110m'] = array of 3-tuples, a la options['moredots']
 	This is like options['moredots'] but it draws the circles on the zoom inset.
 	Note that these part indices are in the 'zoomm' scale.
-
-options['smalldots'] = array of ints, as part indices
-	This is a shortcut to options['moredots']. It's best not to use this.
+	It's best to just use 'zoomdots_10m' unless you have a specific target.
 
 options['iszoom'] = bool
 	Setting this True will create a zoom inset on the right-hand side. The
@@ -137,7 +141,7 @@ center of all the shape's parts.
 options['zoomscale'] = int
 	This sets the level of zoom for the zoom inset. The default value is 2. Only
 some values will work well.
-	Working values are: 2,2.5,4,5,8,10,16,20,32,40,64,... 
+	Working values are: 2,2.5,4,5,6.25,8,10,12.5,16,20,25,32,40,50,64,... 
 	Not-great values are: 3,6,7, etc. that don't divide 10 well
 
 options['partindices'] = array of int, index values of parts
@@ -234,6 +238,9 @@ could start with sphere_test() by running:
 proceed to sphere2_test() and so on. There is a list of _test
 procedures in runparams().
 
+class AutoZoom():
+	Given shapes, this finds the best zoom level to maximize the shape in
+a rectangle. Can also trim unused space from the minor axis.
 
 class BoxZoomCleave():
 	This trims shapes to fit a specified rectangle, in the flat x,y plane.
@@ -275,6 +282,12 @@ class FlatShape():
 class HemiCleave():
 	This trims shapes on a sphere, trimming away the back half of the sphere.
 
+class Hypso():
+	For managing hypso bitmaps, uses HypsoSphere, FlatImage.
+
+class HypsoSphere():
+	Maps rectangular bitmap data to sphere.
+
 class Install():
 	This handles filename locations of shp and dbf files.
 
@@ -310,14 +323,31 @@ class Output():
 class OutputPath():
 	Used for merging paths.
 
+class Palette():
+	Used for reducing 24bit color to 8bit indexed color, for hypso.
+
 class PartCircle():
 	For drawing circle highlights around shape parts.
+
+class Png():
+	For compressing rgba bitmaps to png. Png data can be included
+inline in svg.
 
 class Polygon():
 	A basic polygon, one step from shp data.
 
 class Polyline():
 	A basic polyline, one step from shp data.
+
+class RGBAImage():
+	A red/green/blue/alpha 32bitperpixel bitmap.
+
+class RGBMultiPoint():
+	When mapping multiple points to one point, this stores rgb data.
+
+class RGBMultiPoints():
+	For mapping a large bitmap down to smaller. Used for mapping
+a rectangle to a circle.
 
 class Segments():
 	For storing points as a linked list instead of array.
@@ -345,7 +375,11 @@ class Shift():
 	For translating flat shapes, this is used for zoom insets.
 
 class ShpAdmin():
-	A manager for admin0 data, this groups shp, dbf, etc. in one place.
+	A manager for admin0 data, this groups admin0 with related admin1, lakes,
+disputed, etc. in one place.
+
+class ShpAdminPart():
+	For ShpAdmin, this groups shp and dbf together.
 
 class ShpAdminShape():
 	A Shape, tailored for admin0.
