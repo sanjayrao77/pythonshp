@@ -12,84 +12,84 @@ It can also be used to read SHP files in general.
 ```
 ./pythonshp.py publicdomain verbose wiki1 unitedstatesofamerica locatormap > unitedstatesofamerica_w1_locator.svg
 ```
-This svg is 104K at 1000x1000.
+This svg is 104K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/unitedstatesofamerica_w1_locator.png" width="300" />
 
 ### USA wiki2 locatormap
 ```
 ./pythonshp.py publicdomain verbose wiki2 unitedstatesofamerica locatormap > unitedstatesofamerica_w2_locator.svg
 ```
-This svg is 220K at 1000x1000.
+This svg is 220K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/unitedstatesofamerica_w2_locator.png" width="300" />
 
 ### Estonia wiki1 locatormap, showing zoom inset
 ```
 ./pythonshp.py publicdomain verbose wiki1 estonia locatormap > estonia_w1_locator.svg
 ```
-This svg is 144K at 1000x1000.
+This svg is 144K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/estonia_w1_locator.png" width="300" />
 
 ### Estonia wiki2 locatormap, showing zoom inset
 ```
 ./pythonshp.py publicdomain verbose wiki2 estonia locatormap > estonia_w2_locator.svg
 ```
-This svg is 248K at 1000x1000.
+This svg is 248K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/estonia_w2_locator.png" width="300" />
 
 ### Luxembourg wiki1 euromap
 ```
 ./pythonshp.py publicdomain verbose wiki1 luxembourg euromap > luxembourg_w1_euromap.svg
 ```
-This svg is 60K at 1000x1000.
+This svg is 60K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/luxembourg_w1_euromap.png" width="300" />
 
 ### India wiki1 disputed countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki1 india/_disputed countrymap > india_disputed_w1_countrymap.svg
 ```
-This svg is 60K at 1000x1000.
+This svg is 60K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/india_disputed_w1_countrymap.png" width="300" />
 
 ### Canada wiki1 countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki1 canada countrymap > canada_w1_countrymap.svg
 ```
-This svg is 152K at 1000x1000.
+This svg is 152K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/canada_w1_countrymap.png" width="300" />
 
 ### Canada wiki1 province/territory "admin1" countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki1 canada/_admin1 countrymap > canada_admin1_w1_countrymap.svg
 ```
-This svg is 160K at 1000x1000.
+This svg is 160K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/canada_admin1_w1_countrymap.png" width="300" />
 
 ### Alberta wiki1 countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki1 canada/alberta countrymap > canada_alberta_w1_countrymap.svg
 ```
-This svg is 160K at 1000x1000.
+This svg is 160K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/canada_alberta_w1_countrymap.png" width="300" />
 
 ### Canada wiki2 countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki2 canada countrymap > canada_w2_countrymap.svg
 ```
-This svg is 296K at 1000x1000.
+This svg is 296K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/canada_w2_countrymap.png" width="300" />
 
 ### Canada wiki2 province/territory "admin1" countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki2 canada/_admin1 countrymap > canada_admin1_w2_countrymap.svg
 ```
-This svg is 232K at 1000x1000.
+This svg is 232K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/canada_admin1_w2_countrymap.png" width="300" />
 
 ### Alberta wiki2 countrymap
 ```
 ./pythonshp.py publicdomain verbose wiki2 canada/alberta countrymap > canada_alberta_w2_countrymap.svg
 ```
-This svg is 232K at 1000x1000.
+This svg is 232K at 1000x1000 (png is scaled down).
 <img src="http://www.evilcouncil.com/github/canada_alberta_w2_countrymap.png" width="300" />
 
 
