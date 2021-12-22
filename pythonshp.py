@@ -24,6 +24,16 @@ import struct
 import math
 import sys
 import os
+import io
+import base64
+try:
+	import zlib
+except ImportError:
+	zlib=None
+try:
+	import zipfile
+except ImportError:
+	zipfile=None
 
 NULL_TYPE_SHP=0
 POINT_TYPE_SHP=1
@@ -45,6 +55,7 @@ NONE_CCWTYPE=0
 REVERSE_CCWTYPE=1 # lakes, ccws are water
 HOLE_CCWTYPE=2 # Lesotho, hole in a shape
 CW_CCWTYPE=3 # force CW even if CCW
+CUTOUT_CCWTYPE=4
 def ccwtype_tostring(c):
 	if c==NONE_CCWTYPE: return 'NONE'
 	if c==REVERSE_CCWTYPE: return 'REVERSE'
@@ -52,6 +63,7 @@ def ccwtype_tostring(c):
 	if c==CW_CCWTYPE: return 'CW'
 	return 'UNK'
 
+M_PI=math.pi
 M_PI_2=math.pi/2.0
 M_PI_4=math.pi/4.0
 M_3PI_2=math.pi+M_PI_2
@@ -60,30 +72,69 @@ isverbose_global=False
 ispartlabeltop_global=True
 debug_global=0
 
-def uint32_big(buff,offset):
-	b0=buff[offset]
-	b1=buff[offset+1]
-	b2=buff[offset+2]
-	b3=buff[offset+3]
-	return b0*16777216+b1*65536+b2*256+b3
-def uint32_little(buff,offset):
-	b0=buff[offset]
-	b1=buff[offset+1]
-	b2=buff[offset+2]
-	b3=buff[offset+3]
-	return b3*16777216+b2*65536+b1*256+b0
-def uint16_little(buff,offset):
-	b0=buff[offset]
-	b1=buff[offset+1]
-	return b1*256+b0
-def getdouble(buff,offset):
-	d=struct.unpack('d',buff[offset:offset+8])
-	return d[0]
+LAND_SPHERE_CSS='sl'
+BORDER_SPHERE_CSS='sb'
+PATCH_LAND_SPHERE_CSS='sp'
+HIGH_LAND_SPHERE_CSS='sh'
+PATCH_HIGH_LAND_SPHERE_CSS='sq'
+HIGH_BORDER_SPHERE_CSS='si'
+AREA_LAND_SPHERE_CSS='al'
+AREA_BORDER_SPHERE_CSS='ab'
+PATCH_AREA_LAND_SPHERE_CSS='ap'
+AREA_LAKELINE_SPHERE_CSS='ai'
+DISPUTED_LAND_SPHERE_CSS='dl'
+PATCH_DISPUTED_LAND_SPHERE_CSS='dp'
+DISPUTED_BORDER_SPHERE_CSS='db'
+DISPUTED_LAND_ZOOM_CSS='dz'
+DISPUTED_BORDER_ZOOM_CSS='dy'
+PATCH_DISPUTED_LAND_ZOOM_CSS='dx'
+LAND_ZOOM_CSS='zl'
+PATCH_LAND_ZOOM_CSS='zp'
+HIGH_LAND_ZOOM_CSS='zh'
+PATCH_HIGH_LAND_ZOOM_CSS='zq'
+HIGH_LAKELINE_ZOOM_CSS='zi'
+BORDER_ZOOM_CSS='zb'
+WATER_ZOOM_CSS='zw'
+PATCH_WATER_ZOOM_CSS='zr'
+LAND_TRIPEL_CSS='tl'
+PATCH_LAND_TRIPEL_CSS='tp'
+HIGH_LAND_TRIPEL_CSS='th'
+PATCH_HIGH_LAND_TRIPEL_CSS='tq'
+BACK_TRIPEL_CSS='tb'
+OCEAN_TRIPEL_CSS='to'
+COAST_TRIPEL_CSS='tc'
+GRID_SPHERE_CSS='sg'
+GRID_TRIPEL_CSS='tg'
+SHADOW_FONT_CSS='fs'
+TEXT_FONT_CSS='ft'
+ONE_CIRCLE_CSS='c1'
+TWO_CIRCLE_CSS='c2'
+THREE_CIRCLE_CSS='c3'
+FOUR_CIRCLE_CSS='c4'
+SHADOW_ONE_CIRCLE_CSS='w1'
+SHADOW_TWO_CIRCLE_CSS='w2'
+SHADOW_THREE_CIRCLE_CSS='w3'
+SHADOW_FOUR_CIRCLE_CSS='w4'
+WATER_SPHERE_CSS='sw'
+PATCH_WATER_SPHERE_CSS='sr'
+HYPSOCUT_SPHERE_CSS='hc'
+
+def getshadow_circle_css(class1):
+	if class1==ONE_CIRCLE_CSS: return SHADOW_ONE_CIRCLE_CSS
+	if class1==TWO_CIRCLE_CSS: return SHADOW_TWO_CIRCLE_CSS
+	if class1==THREE_CIRCLE_CSS: return SHADOW_THREE_CIRCLE_CSS
+	if class1==FOUR_CIRCLE_CSS: return SHADOW_FOUR_CIRCLE_CSS
+	raise ValueError
+
+def uint32_big(buff,offset): return struct.unpack(">I",buff[offset:offset+4])[0]
+def uint32_little(buff,offset): return struct.unpack("<I",buff[offset:offset+4])[0]
+def uint16_little(buff,offset): return struct.unpack("<H",buff[offset:offset+2])[0]
+def getdouble(buff,offset): return struct.unpack('d',buff[offset:offset+8])[0]
 
 def shapename(typenum):
 	if typenum==POLYGON_TYPE_SHP: return "polygon"
 	if typenum==POLYLINE_TYPE_SHP: return "polyline"
-	if typenum==POINT_TyPE_SHP: return "point"
+	if typenum==POINT_TYPE_SHP: return "point"
 	if typenum==NULL_TYPE_SHP: return "null"
 	return "[unktype:"+str(typenum)+"]"
 
@@ -129,14 +180,19 @@ class OutputPath():
 
 class Output():
 	def __init__(self):
-		self.file=sys.stdout
+		self.lines=[]
+		self.csscounts={}
 		self.path=None
+	def countcss(self,cssclass):
+		cs=cssclass.split(' ')
+		for c in cs:
+			self.csscounts[c]=self.csscounts.get(c,0)+1
 	def flush(self):
 		self.path_flush()
 	def setfile(self,outf):
 		self.file=outf
 	def rawprint(self,s):
-		print(s,file=self.file,end='')
+		self.lines.append(s)
 	def print(self,s):
 		self.flush()
 		self.rawprint(s)
@@ -149,6 +205,7 @@ class Output():
 			if self.path.isopen(cssclass):
 				return
 			self.path_flush()
+		self.countcss(cssclass)
 		self.path=OutputPath(cssclass)
 	def addtopath(self,dstring):
 		self.path.addd(dstring)
@@ -156,6 +213,11 @@ class Output():
 		if not self.path: return
 		self.path.write(self)
 		self.path=None
+	def prepend(self,output):
+		self.lines[0:0]=output.lines
+#		for c in output.csscounts: self.csscounts[c]=self.csscounts.get(c,0)+output.csscounts[c] # untested, unused
+	def writeto(self,file):
+		for l in self.lines: print(l,end='',file=file)
 		
 
 class Mbr():
@@ -182,6 +244,32 @@ class Mbr():
 			elif x>self.maxx: self.maxx=x
 			if y<self.miny: self.miny=y
 			elif y>self.maxy: self.maxy=y
+	def addmbr(self,mbr):
+		if not self.isset:
+			(self.isset, self.minx, self.miny, self.maxx, self.maxy) = (mbr.isset, mbr.minx, mbr.miny, mbr.maxx, mbr.maxy)
+		elif mbr.isset:
+			if self.minx>mbr.minx: self.minx=mbr.minx
+			if self.miny>mbr.miny: self.miny=mbr.miny
+			if self.maxx<mbr.maxx: self.maxx=mbr.maxx
+			if self.maxy<mbr.maxy: self.maxy=mbr.maxy
+	def getcenter(self):
+		return ((self.maxx+self.minx)/2,(self.maxy+self.miny)/2)
+	def getpseudoradius(self,width):
+		(ax,ay)=self.getcenter()
+		rrs=[FlatPoint.distance2(ax,ay,self.minx,self.miny)]
+		rrs.append(FlatPoint.distance2(ax,ay,self.minx,self.maxy))
+		rrs.append(FlatPoint.distance2(ax,ay,self.maxx,self.miny))
+		rrs.append(FlatPoint.distance2(ax,ay,self.maxx,self.maxy))
+		highest=0
+		for rr in rrs:
+			if rr>highest: highest=rr
+		return (math.sqrt(highest)*width)/180
+	def isintersects(self,two):
+		if self.minx>two.maxx: return False
+		if self.maxx<two.minx: return False
+		if self.miny>two.maxy: return False
+		if self.maxy<two.miny: return False
+		return True
 	def print(self): print(str(self))
 
 class DegLonLat():
@@ -200,8 +288,8 @@ class DegLonLat():
 		self.patchtype=patchtype
 	def __str__(self):
 		return '(%f,%f)'%(self.lon,self.lat)
-	def print(self):
-		print('( %.12f,%.12f )'%(self.lon,self.lat))
+	def print(self,file=sys.stdout):
+		print('( %.12f,%.12f )'%(self.lon,self.lat),file=file)
 	def clone(self):
 		return DegLonLat(self.lon,self.lat,self.side,self.patchtype)
 	def isinmbr(self,mbr):
@@ -223,6 +311,356 @@ def getangle(x1,y1,x2,y2):
 		if x2>x1: return M_3PI_2+math.atan((x2-x1)/(y1-y2))
 		elif x2==x1: return M_3PI_2
 		else: return math.pi+math.atan((y1-y2)/(x1-x2))
+
+class PngCompress():
+	@staticmethod
+	def create(width,height,rows,isfast=False,palette=None,transtable=None):
+		bio=io.BytesIO()
+		bio.write(b'\x89PNG\r\n\x1a\n')
+		if palette:
+			Bpp=1
+			PngCompress.writechunk(bio,b'IHDR',struct.pack('>2I5B',width,height,8,3,0,0,0))
+			PngCompress.writechunk(bio,b'PLTE',palette)
+			if transtable: PngCompress.writechunk(bio,b'tRNS',transtable)
+		else:
+			Bpp=int(len(rows[0])/width)
+			if Bpp==4: colortype=6 # rgba
+			elif Bpp==3: colortype=2 # rgb
+			elif Bpp==2: colortype=4 # greyscale+alpha
+			elif Bpp==1: colortype=0 # greyscale
+			else: raise ValueError
+			PngCompress.writechunk(bio,b'IHDR',struct.pack('>2I5B',width,height,8,colortype,0,0,0))
+		if isfast: PngCompress.write_simple(bio,rows,3)
+		else: PngCompress.write_small(bio,rows,width,Bpp)
+		PngCompress.writechunk(bio,b'IEND',b'')
+		return bio.getvalue()
+	@staticmethod
+	def writechunk(bio,key,value):
+		bio.write(struct.pack('>I',len(value)))
+		bio.write(key)
+		bio.write(value)
+		bio.write(struct.pack('>I',zlib.crc32(value,zlib.crc32(key))))
+	@staticmethod
+	def write_simple(bio,rows,complevel): # complevel, 3:fast, 6:medium, 9: smallest
+		ba=bytearray()
+		for row in rows:
+			ba.append(0)
+			ba.extend(row)
+		PngCompress.writechunk(bio,b'IDAT',zlib.compress(ba,complevel))
+	@staticmethod
+	def paethpredictor(a,b,c): # PaethPredictor is lifted from PNG spec, presumably this is free as it's required for all readers
+		# a:left, b:above, c:upperleft
+		p=a+b-c
+		pa=abs(p-a)
+		pb=abs(p-b)
+		pc=abs(p-c)
+		# return nearest of a,b,c, breaking ties in order a,b,c
+		if pa<=pb and pa<=pc: return a
+		if pb<=pc: return b
+		return c
+	@staticmethod
+	def getcompsize(zco,line):
+		z=zco.copy()
+		return len(z.compress(line))+len(z.flush())
+	@staticmethod
+	def write_small(bio,rows,width,Bpp):
+		zco=zlib.compressobj(level=9,memLevel=9)
+		zba=bytearray()
+		widthxB=width*Bpp
+		ba=bytearray(1+widthxB)
+		tba=bytearray(1+widthxB)
+		urow=[0]*widthxB
+		for row in rows:
+			ba[0]=0
+			ba[1:]=row
+			bal=PngCompress.getcompsize(zco,ba)
+			if True:
+				tba[0]=1 # Left
+				tba[1:1+Bpp]=row[0:Bpp]
+				for i in range(Bpp,widthxB): tba[i+1]=(row[i]-row[i-Bpp])%256
+				tbal=PngCompress.getcompsize(zco,tba)
+				if tbal<bal: ba,tba,bal=(tba,ba,tbal)
+			if True:
+				tba[0]=2 # Up
+				for i in range(widthxB): tba[i+1]=(row[i]-urow[i])%256
+				tbal=PngCompress.getcompsize(zco,tba)
+				if tbal<bal: ba,tba,bal=(tba,ba,tbal)
+			if True:
+				tba[0]=3 # Left + Up
+				for i in range(Bpp): tba[i+1]=(row[i]-(urow[i]>>1))%256
+				for i in range(Bpp,widthxB): tba[i+1]=(row[i]-((row[i-Bpp]+urow[i])>>1))%256
+				tbal=PngCompress.getcompsize(zco,tba)
+				if tbal<bal: ba,tba,bal=(tba,ba,tbal)
+			if True:
+				tba[0]=4 # Paeth
+				for i in range(Bpp): tba[i+1]=(row[i]-PngCompress.paethpredictor(0,urow[i],0))%256
+				for i in range(Bpp,widthxB): tba[i+1]=(row[i]-PngCompress.paethpredictor(row[i-Bpp],urow[i],urow[i-Bpp]))%256
+				tbal=PngCompress.getcompsize(zco,tba)
+				if tbal<bal: ba,tba,bal=(tba,ba,tbal)
+			zba.extend(zco.compress(ba))
+			urow=row
+		zba.extend(zco.flush())
+		PngCompress.writechunk(bio,b'IDAT',zba)
+
+class Palette():
+	@staticmethod
+	def ddistance(a,b):
+		dr=a[0]-b[0]
+		dg=a[1]-b[1]
+		db=a[2]-b[2]
+		return dr*dr+dg*dg+db*db
+	def __init__(self):
+		self.colors=[]
+		self.raw=None
+		self.cache={}
+	def loaddefaults(self):
+		m='eNoFwftP2ggAAGD/vv12JrtLdpu7XVyce6rZzi2euBlFDVMBBQGBYltKX0BbaKFQsBYRKRWYVhRXJKADH8wHZG7ecsm+r6ur684oPDClM70f7DVYJifG3k4tdS+Ahsnh'\
+'PuN4jyl810Lft67es20MWxd6XBgwq+tZlq3GD3+4cw/cG4+d6Ucu5TdYnrbrAfPsn2DxrxW5F0KeAlKvpzAITs84LMsWYx/s1jvnTDZLv0cedy2+gix/Q8qbFfeA16TzOC0O4x'\
+'CEduOFUdA0DJseIupjbx6z6kegpSew6rEbfsdLoyD+Dgob3MxLb+E5yr7wrc8BRB9aHEDkfnxnhDBP+KAhbEePmZ+R6gwGzKF2nd9hQYB5FHgRKNGA0QM7DBg5RS7PYQgMLxLg'\
+'4ge8+I9/798gMREAZ0j0FVXGYWCQPngW3n1Dq0Oh3CRjtxJBHRNxEgCIIXF4fowu2cjI63BlOWCfoLcc5NoCFXrH7k+z4DzjNzOojlu30oHZUMznh5YYKIY67DQWwl1+0sXitn'\
+'kWAijMwGVG+QoZSI4IZRO3v8Qz07GqIa4uCniM9q5S3vFk3cNTYEQC+AgSJWBO0Se1WeEzwCd8UToYIWXKGWF9TARJM2485iWiMSDhT7ArmzQ6ufYFTCKrHE7HuY+p2oJU52O8'\
+'W9Rs6RIh7poz1YCokFIqLQSp1XJQitMSKyYp02bzE0/xIqfySDhF8sm9sKjaM01hLagITF4gnJlaUfBmk0RKJJy5sxWlEc3UwlkNztf3UmQxHdpO++PZkibRiWwllYt6i+epza'\
+'qS5RKKvL/BSVtrmHpRykW3lfWt/FaqeCznj4N7rdhuNVL6Wv4k1gqirNazu6esdi1obf7wa/7gUqpeauXKUVkpa9s7lXPtc+NAa23UO/vVRqNSOj6sbH65OaxVykfXueaPar2z'\
+'0/heOOkcN74fntw0m9f1s3br9OLk7Ge99bN1fnN6dXvUvu1cfbtqX150bjrt/398++8XjhcUpA=='
+		z=base64.standard_b64decode(m)
+		raw=zlib.decompress(z)
+		self.raw=raw
+		for i in range(0,len(raw),3):
+			self.colors.append(raw[i:i+3])
+	def findclosest(self,rgb):
+		bi=0
+		bv=200000
+		for i in range(1,len(self.colors)):
+			v=Palette.ddistance(rgb,self.colors[i])
+			if v<bv:
+				bv=v
+				bi=i
+		return bi
+	def getindex(self,rgba):
+		if not rgba[3]: return 0
+		rgb=tuple(rgba[0:3])
+		i=self.cache.get(rgb,0)
+		if i: return i
+		i=self.findclosest(rgb)
+		self.cache[rgb]=i
+		return i
+		
+
+class FlatImage():
+	def __init__(self,width,height,fillpixel):
+		self.Bpp=len(fillpixel)
+		self.width=width
+		self.height=height
+		self.rows=[]
+		for i in range(height): self.rows.append(fillpixel*width)
+		self.palette=None
+		self.transtable=None
+	def setpixel(self,x,y,pixel):
+		self.rows[y][x*self.Bpp:(x+1)*self.Bpp]=pixel
+	def getpng(self,isfast=False):
+		return PngCompress.create(self.width,self.height,self.rows,isfast,palette=self.palette,transtable=self.transtable)
+	def indexcolors(self,palette):
+		self.palette=palette.raw
+		self.transtable=b'\x00' # we're flattening to on/off transparency
+		for row in self.rows:
+			for i in range(len(row),0,-4):
+				row[i-4:i]=(palette.getindex(row[i-4:i]),)
+
+class RGBMultiPoint():
+	def __init__(self):
+		(self.r,self.g,self.b,self.count)=(0,0,0,0)
+	def addrgb(self,r,g,b):
+		self.r+=r
+		self.g+=g
+		self.b+=b
+		self.count+=1
+	def getrgb(self):
+		if not self.count: return (0,0,0)
+		return (int(self.r/self.count),int(self.g/self.count),int(self.b/self.count))
+
+class RGBMultiPoints():
+	def __init__(self,width,height):
+		self.rows=[]
+		for i in range(height): self.addrow(width)
+	def addrow(self,width):
+		row=[]
+		for i in range(width): row.append(RGBMultiPoint())
+		self.rows.append(row)
+	def setpixel(self,x,y,rgb):
+		if y<0: raise ValueError
+		mp=self.rows[y][x]
+		mp.addrgb(rgb[0],rgb[1],rgb[2])
+	def setrgba(self,rgba):
+		for j,row in enumerate(self.rows):
+			for i,mp in enumerate(row):
+				if not mp.count: continue
+				(r,g,b)=mp.getrgb()
+				rgba.setpixel(i,j,(r,g,b,255))
+
+class HypsoSphere():
+	@staticmethod
+	def readheader(f):
+		r=[]
+		fuse=3
+		while True:
+			b=f.read(1)
+			r.append(b[0])
+			if b==b'\n':
+				fuse-=1
+				if not fuse: break
+		return bytes(r)
+	def __init__(self,filename):
+		self.filename=filename
+		self.f=open(filename,'rb')
+		header=HypsoSphere.readheader(self.f)
+		self.offset=len(header)
+		sheader=header.decode()
+		lines=sheader.split('\n')
+		if lines[0]=='P6': self.isgrayscale=False
+		elif lines[0]=='P5': self.isgrayscale=True
+		else: raise ValueError
+		wh=lines[1].split(' ')
+		self.width=int(wh[0])
+		self.height=int(wh[1])
+		if int(lines[2])!=255: raise ValueError
+		self.dzr=1
+		self.dzt=1
+		self.dzw=2
+		self.dzh=2
+	def setcenter(self,lon,lat):
+		crx=-(lon*M_PI)/180.0
+		cry=-(lat*M_PI)/180.0
+		self.crx=crx
+		self.rot_a=math.cos(crx);
+		self.rot_c=math.sin(crx);
+		self.rot_e=math.cos(cry);
+		self.rot_f=math.sin(cry);
+	def setzoom(self,dzr,dzt,dzw,dzh):
+		(self.dzr,self.dzt,self.dzw,self.dzh)=(dzr,dzt,dzw,dzh)
+	def draw(self,rgba):
+		destw=rgba.width
+		destwm1=destw-1
+		desth=rgba.height
+		desthm1=desth-1
+		(a,c,e,f)=(self.rot_a,self.rot_c,self.rot_e,self.rot_f)
+		(dzr,dzt,dzw,dzh)=(self.dzr,self.dzt,self.dzw,self.dzh)
+		multipoints=RGBMultiPoints(destw,desth)
+		sclookup=[]
+		for ui in range(self.width):
+			rlon=((2*ui+1)*M_PI)/self.width - M_PI
+			rlon+=self.crx
+			sclookup.append( (math.cos(rlon), math.sin(rlon)) )
+		pnm=self.f
+		stride=self.width if self.isgrayscale else 3*self.width
+		for uj in range(self.height):
+			if isverbose_global:
+				if not uj%100: print('HypsoSphere: reading line %d of %d\r'%(uj,self.height),file=sys.stderr,flush=True,end='')
+			rlat=M_PI_2 - ((uj+0.5)*M_PI)/self.height
+			r=math.cos(rlat)
+			z=math.sin(rlat)
+			rgbs=pnm.read(stride)
+			for ui in range(self.width):
+				sc=sclookup[ui]
+				y=r*sc[1]
+				if abs(y)>dzr: continue
+				x=r*sc[0]
+				x2=x*e-z*f
+				if x2<0: continue
+				z2=x*f+z*e
+				if abs(z2)>dzt: continue
+				ux=int(0.5+((y+dzr)*destwm1)/dzw)
+				uy=int(0.5+((dzt-z2)*desthm1)/dzh)
+				if self.isgrayscale: multipoints.setpixel(ux,uy,3*rgbs[ui])
+				else: multipoints.setpixel(ux,uy,rgbs[ui*3:ui*3+3])
+		if isverbose_global:
+			print('HypsoSphere: reading line %d of %d'%(self.height,self.height),file=sys.stderr)
+			print('Flattening multipoints',file=sys.stderr)
+		multipoints.setrgba(rgba)
+
+class Hypso():
+	def __init__(self,width,height,cachedir=None,cachename=None):
+		self.width=width
+		self.height=height
+		self.image=None
+		self.pngdata=None
+		if cachedir and cachename!=None:
+			if not os.access(cachedir,os.X_OK):
+				print('Cache directory not found: %s'%cachedir,file=sys.stderr)
+				raise ValueError
+			self.cachebase=cachedir+'/hypsocache'+cachename
+		else:
+			self.cachebase='hypsocache'
+	def loadsphere(self,sphere):
+		self.image=FlatImage(self.width,self.height,[0,0,0,0])
+		sphere.draw(self.image)
+	def loadraw(self,filename):
+		try:
+			f=open(filename,"rb")
+		except FileNotFoundError:
+			if isverbose_global: print('Checked cache for %s'%filename,file=sys.stderr)
+			return False
+		if isverbose_global: print('Loading raw image from %s'%filename,file=sys.stderr)
+		self.image=FlatImage(self.width,self.height,[0,0,0,0])
+		for j in range(self.height):
+			for i in range(self.width):
+				p=f.read(4)
+				self.image.setpixel(i,j,p)
+		f.close()
+		return True
+	def loadpng(self,filename):
+		try:
+			f=open(filename,"rb")
+		except FileNotFoundError:
+			if isverbose_global: print('Checked cache for %s'%filename,file=sys.stderr)
+			return False
+		if isverbose_global: print('Loading png image from %s'%filename,file=sys.stderr)
+		self.pngdata=f.read()
+		f.close()
+		self.haspng=True
+		return True
+	def getraw(self):
+		bio=io.BytesIO()
+		for row in self.image.rows: bio.write(bytes(row))
+		return bio.getvalue()
+	def saveraw(self,filename):
+		if isverbose_global: print('Saving rgba image to %s'%filename,file=sys.stderr)
+		f=open(filename,"wb")
+		f.write(self.getraw())
+		f.close()
+	def getpng(self,ismime=True,isfast=False):
+		if not self.pngdata: 
+			self.pngdata=self.image.getpng(isfast)
+		if not ismime: return self.pngdata
+		return base64.standard_b64encode(self.pngdata).decode()
+	def savepng(self,filename):
+		if isverbose_global: print('Saving png image to %s'%filename,file=sys.stderr)
+		f=open(filename,"wb")
+		f.write(self.getpng(ismime=False))
+		f.close()
+	def removealpha(self):
+		for row in self.image.rows:
+			for i in range(len(row)-1,0,-4):
+				del row[i]
+	def cornercut(self,corner,left,top):
+		if corner==0:
+			xoff=int((self.width*(left+1))/2)
+			yoff=int((self.height*(1-top))/2)
+			for j in range(yoff,self.height):
+				row=self.image.rows[j]
+				for i in range(xoff*4,self.width*4,4):
+					row[i:i+4]=(0,0,0,0)
+		else: raise ValueError # TODO
+	def indexcolors(self,palette): self.image.indexcolors(palette)
+	def loadraw_cache(self): return self.loadraw(self.cachebase+'.raw')
+	def loadpng_cache(self): return self.loadpng(self.cachebase+'.png')
+	def saveraw_cache(self,isverbose=False):
+		fn=self.cachebase+'.raw'
+		if isverbose and not isverbose_global: print('Saving rgba to %s'%fn,file=sys.stderr)
+		return self.saveraw(fn)
+	def savepng_cache(self,isverbose=False):
+		fn=self.cachebase+'.png'
+		if isverbose and not isverbose_global: print('Saving png to %s'%fn,file=sys.stderr)
+		return self.savepng(fn)
 
 class Polygon():
 	@staticmethod
@@ -519,6 +957,11 @@ class ShapePlus():
 		sp.point=dll
 		return sp
 	@staticmethod
+	def makelinefrompoints(points,index,partindex,draworder):
+		pl=Polyline(index,partindex)
+		pl.points=points
+		return ShapePlus.makefrompolyline(pl,draworder)
+	@staticmethod
 	def pickbiggest(pluses):
 		highp=None
 		highc=0
@@ -679,10 +1122,9 @@ class Shape():
 			x=getdouble(shapedata,4)
 			y=getdouble(shapedata,12)
 			ret.point=DegLonLat(x,y)
-			offset+=20
 			ret.draworder=0
 		elif ret.type==NULL_TYPE_SHP:
-			offset+=4
+			pass
 		else:
 			raise ValueError
 		return ret
@@ -698,8 +1140,21 @@ class Shape():
 		else:
 			if partidx<self.partscount:
 				self.draworderlist[partidx]=draworder
-	def print(self,prefix=''):
-		print('%snumber: %d, shape: %s, parts: %d, points: %d'%(prefix,self.number,shapename(self.type),self.partscount,self.pointscount))
+	def hasdraworder(self,draworder):
+		has=False
+		hasmore=False
+		if self.type==POINT_TYPE_SHP:
+			if self.draworder==draworder: has=True
+			elif self.draworder>draworder: hasmore=True
+		else:
+			for i in range(self.partscount):
+				d=self.draworderlist[i]
+				if d==draworder: has=True
+				elif d>draworder: hasmore=True
+		return (has,hasmore)
+	def print(self,prefix='',file=sys.stdout):
+		print('%snumber: %d, shape: %s, parts: %d, points: %d'%(prefix,self.number,shapename(self.type),self.partscount,self.pointscount),
+				file=file)
 		if True:
 			for i in range(self.partscount):
 				j=self.partlist[i]
@@ -708,13 +1163,13 @@ class Shape():
 #				if True: if self.pointlist[j].lon>-77: continue
 				if self.type==POLYGON_TYPE_SHP:
 					pg=Polygon.make(self,j,k,0,0)
-					print('%d: %d points (%d..%d), iscw:%s'%(i,k-j,j,k,pg.iscw))
+					print('%d: %d points (%d..%d), iscw:%s'%(i,k-j,j,k,pg.iscw),file=file)
 				else:
-					print('%d: %d points (%d..%d)'%(i,k-j,j,k))
+					print('%d: %d points (%d..%d)'%(i,k-j,j,k),file=file)
 				if True:
 					for l in range(j,k):
 						p=self.pointlist[l]
-						p.print()
+						p.print(file=file)
 	def printparts(self,prefix='',file=sys.stdout):
 		print('%snumber: %d, shape: %s, parts: %d, points: %d'%(prefix,self.number,shapename(self.type),self.partscount,self.pointscount),file=file)
 		for i in range(self.partscount):
@@ -734,36 +1189,43 @@ class Shape():
 			if self.partlist[i]>start: self.partlist[i]-=count
 	def getmbr(self,partindices):
 		mbr=Mbr()
-		for partidx in partindices:
-			if partidx<0:
-				for p in self.pointlist: mbr.add(p.lon,p.lat)
-			else:
-				limit=self.pointscount
-				if partidx+1<self.partscount: limit=self.partlist[partidx+1]
-				for ptidx in range(self.partlist[partidx],limit):
-					p=self.pointlist[ptidx]
-					mbr.add(p.lon,p.lat)
+		if partindices==-1:
+			for p in self.pointlist: mbr.add(p.lon,p.lat)
+		else:
+			for partidx in partindices:
+				if partidx<0:
+					for p in self.pointlist: mbr.add(p.lon,p.lat)
+				else:
+					limit=self.pointscount
+					if partidx+1<self.partscount: limit=self.partlist[partidx+1]
+					for ptidx in range(self.partlist[partidx],limit):
+						p=self.pointlist[ptidx]
+						mbr.add(p.lon,p.lat)
 		return mbr
 	def getcenter(self,partindices):
 		mbr=self.getmbr(partindices)
 		if not mbr.isset: raise ValueError
-		return ((mbr.maxx+mbr.minx)/2,(mbr.maxy+mbr.miny)/2)
+		return mbr.getcenter()
 
 class Shp(): # don't try to extend shp, just store data as literally as possible
-	def __init__(self,filename,installfile=None):
-		self.filename=filename
+	def __init__(self,filename=None,installfile=None):
+		if installfile:
+			self.filename=installfile.filename
+		else:
+			self.filename=filename
 		self.shapes=[]
 		self.installfile=installfile
 		self.bynickname={}
 	def printinfo(self):
-		f=open(self.filename,"rb")
+		if self.installfile: f=self.installfile.open()
+		else: f=open(self.filename,"rb")
 		header=f.read(100)
 		filecode=uint32_big(header,0)
 		bytes_filelength=2*uint32_big(header,24)
 		version=uint32_little(header,28)
 		print('filecode: 0x%x' % filecode)
-		print('bytes_filelength: '+str(bytes_filelength))
-		print('version: '+str(version))
+		print('bytes_filelength: %d'%bytes_filelength)
+		print('version: %d'%version)
 		offset=100
 		while True:
 			if offset==bytes_filelength: break
@@ -782,7 +1244,8 @@ class Shp(): # don't try to extend shp, just store data as literally as possible
 			offset+=8+rlength
 		f.close()
 	def loadshapes(self):
-		f=open(self.filename,"rb")
+		if self.installfile: f=self.installfile.open()
+		else: f=open(self.filename,"rb")
 		header=f.read(100)
 		bytes_filelength=2*uint32_big(header,24)
 		offset=100
@@ -916,7 +1379,6 @@ class SpherePoint():
 		sp.side=0
 		sp.lon=dll.lon
 		sp.lat=dll.lat
-
 		(sp.x,sp.y,sp.z)=rotation.xyz_fromdll(sp.lon,sp.lat)
 		return sp
 	def print(self,file=sys.stdout):
@@ -932,13 +1394,17 @@ class SpherePoint():
 		sp.z=self.z
 		sp.patchtype=self.patchtype
 		return sp
-	def flatten(self,width,height):
-		ux=int(0.5+((self.y+1.0)*(width-1))/2.0)
-		uy=int(0.5+((1.0-self.z)*(height-1))/2.0)
+	def flatten(self,width,height,right=1,top=1):
+		rightx2=right*2
+		topx2=top*2
+		ux=int(0.5+((self.y+right)*(width-1))/rightx2)
+		uy=int(0.5+((top-self.z)*(height-1))/topx2)
 		return FlatPoint(ux,uy,NONE_PATCHTYPE)
-	def flattenf(self,width,height):
-		ux=((self.y+1.0)*(width-1))/2.0
-		uy=((1.0-self.z)*(height-1))/2.0
+	def flattenf(self,width,height,right=1,top=1):
+		rightx2=right*2
+		topx2=top*2
+		ux=((self.y+right)*(width-1))/rightx2
+		uy=((top-self.z)*(height-1))/topx2
 		return FlatPoint(ux,uy,NONE_PATCHTYPE)
 	def cleave(self,c):
 		if 1!=c.setsides([self]): return self
@@ -1011,6 +1477,10 @@ class FlatPolygon():
 		print('FlatPolygon:',file=file)
 		for p in self.points:
 			print('point: %s'%p,file=file)
+	def getmbr(self):
+		mbr=Mbr()
+		for p in self.points: mbr.add(p.ux,p.uy)
+		return mbr
 
 class FlatPolyline():
 	def __init__(self):
@@ -1036,32 +1506,40 @@ class Shift():
 		self.yoff=yoff
 
 class BoxZoomCleave():
-	def __init__(self,zoomfactor,left,right,bottom,top,zoomshift=None):
-		self.zoomfactor=zoomfactor
-		self.left=left
+	def __init__(self,right,top,width,height,splitlimit,shift=None):
 		self.right=right
-		self.bottom=bottom
 		self.top=top
-		self.zoomshift=zoomshift
+		self.shift=shift
+		self.width=width
+		self.height=height
+		self.splitlimit=splitlimit
 	def cleave(self,onesphere):
-		self.isz=False
-		self.ishigh=True
-		self.val=self.right
-		onesphere.cleave(self)
-		self.isz=False
-		self.ishigh=False
-		self.val=self.left
-		onesphere.cleave(self)
-		self.isz=True
-		self.ishigh=True
-		self.val=self.top
-		onesphere.cleave(self)
-		self.isz=True
-		self.ishigh=False
-		self.val=self.bottom
-		onesphere.cleave(self)
-	def shift(self,flatshape):
-		if self.zoomshift: flatshape.shift(self.zoomshift)
+		if self.right!=1:
+			self.isz=False
+			self.ishigh=True
+			self.val=self.right
+			onesphere.cleave(self)
+			self.isz=False
+			self.ishigh=False
+			self.val=-self.right
+			onesphere.cleave(self)
+		if self.top!=1:
+			self.isz=True
+			self.ishigh=True
+			self.val=self.top
+			onesphere.cleave(self)
+			self.isz=True
+			self.ishigh=False
+			self.val=-self.top
+			onesphere.cleave(self)
+	def flatten(self,sphereshape):
+		flatshape=sphereshape.flatten(self.width,self.height,self.splitlimit,self.right,self.top)
+		if self.shift: flatshape.shift(self.shift)
+		return flatshape
+	def flattenpoint(self,spherepoint):
+		flatpoint=spherepoint.flatten(self.width,self.height,self.right,self.top)
+		if self.shift: flatpoint.shift(self.shift)
+		return flatpoint
 	def stitchsegments(self,one,two,onecrossu,twocrossu):
 		if self.isz: one.patchtype=HORIZ_PATCHTYPE
 		else: one.patchtype=VERT_PATCHTYPE
@@ -1148,6 +1626,77 @@ class BoxZoomCleave():
 		else:
 			for x in intersections.list: x.crossu=x.s0.z
 
+class AutoZoom():
+	def __init__(self):
+		self.shapes=[]
+		self.shapembr=None
+		self.spherembr=None
+		self.center=None
+		self.rotation=None
+		self.zoomfactor=None
+		self.width=None
+		self.height=None
+	def addshape(self,shape):
+		self.shapes.append(shape)
+	def getcenter(self):
+		mbr=Mbr()
+		for s in self.shapes:
+			mbr.addmbr(s.getmbr(-1))
+		self.shapembr=mbr
+		self.center=mbr.getcenter()
+		return self.center
+	def getspherembr(self):
+		(lon,lat)=self.getcenter()
+		rotation=SphereRotation()
+		rotation.set_deglonlat(lon,lat)
+		self.rotation=rotation
+		hc=HemiCleave()
+		mbr=Mbr()
+		for s in self.shapes:
+			pluses=ShapePlus.make(s)
+			for oneplus in pluses:
+				onesphere=SphereShape(oneplus,rotation)
+				hc.cleave(onesphere)
+				if onesphere.type==NULL_TYPE_SHP: continue
+				mbr.addmbr(onesphere.getmbr())
+		self.spherembr=mbr
+		return mbr
+	def getzoomfactor(self):
+		factors=(1.4,2,2.5,4,5,6.25,8,10,12.5,16,20,25,32,40,50,64,80,100,128,160,200,256)
+		mbr=self.getspherembr()
+		works=1
+		for x in factors:
+			l=1/x
+			l=l*0.99 # gives us a little margin
+			if mbr.maxx>l: break
+			if mbr.maxy>l: break
+			if mbr.minx<-l: break
+			if mbr.miny<-l: break
+			works=x
+		self.zoomfactor=works
+		if isverbose_global: print('AutoZoom factor',works,file=sys.stderr)
+		return works
+	def getboxzoomcleave(self,width,splitlimit,isautotrim):
+		scale=self.getzoomfactor()
+		boxd=1/scale
+		boxw=boxd
+		boxh=boxd
+		height=width
+		if isautotrim:
+			smbr=self.spherembr
+			dx=min(boxd-smbr.maxx,boxd+smbr.minx)
+			dy=min(boxd-smbr.maxy,boxd+smbr.miny)
+			if dx>dy:
+				boxw=boxd-dx+dy
+				width=int(boxw*width/boxd)
+			else:
+				boxh=boxd-dy+dx
+				height=int(boxh*height/boxd)
+			self.width=width
+			self.height=height
+		bzc=BoxZoomCleave(boxw,boxh,width,height,splitlimit)
+		return bzc
+
 class SvgFragment():
 	@staticmethod
 	def isinline(x1,y1,x2,y2,x3,y3):
@@ -1186,14 +1735,11 @@ class SvgFragment():
 		self.isclosed=False
 		self.isreduced=False
 		self.points=[]
-	def reduce(self):
+	def reduce(self,isforce):
 #		print('Reducing points: ',self.points,file=sys.stderr) #cdebug
 		if self.isclosed:
 			while True:
-				if len(self.points)<2:
-					self.points=[]
-					return
-				if self.points[0]==self.points[-1]:
+				if len(self.points)>1 and self.points[0]==self.points[-1]:
 					self.points.pop()
 					continue
 				break
@@ -1206,9 +1752,11 @@ class SvgFragment():
 				j=SvgFragment.inlinecount(self.points,i)
 				if j>0:
 					del self.points[i+1:i+j+1]
-					i+=j
 					k-=j
 				i+=1
+
+		if not isforce:
+			if len(self.points)<2: self.points=[]
 
 class SvgPath():
 	def __init__(self,cssclass):
@@ -1226,12 +1774,16 @@ class SvgPath():
 		self.curfragment.points.append((int(x),int(y)))
 	def closepath(self):
 		self.curfragment.isclosed=True
-	def write(self,output):
-		output.newpath(self.cssclass)
+	def write(self,output,isforce=False):
+		found=0
 		for fragment in self.fragments:
 			if not fragment.isreduced:
-				fragment.reduce()
+				fragment.reduce(isforce)
 				fragment.isreduced=True
+			found+=len(fragment.points)
+		if not found: return
+		output.newpath(self.cssclass)
+		for fragment in self.fragments:
 			points=fragment.points
 			if len(points)==0: continue
 			p=points[0]
@@ -1251,7 +1803,10 @@ class SvgPath():
 						output.addtopath('h%d'%(p[0]-q[0]))
 					else:
 						output.addtopath('l%d,%d'%(p[0]-q[0],p[1]-q[1]))
-			if fragment.isclosed: output.addtopath('Z')
+			if len(points)<2:
+				output.addtopath('h1') # isforce, forces drawing of the pixel
+			elif fragment.isclosed:
+				output.addtopath('Z')
 	def write_raw(self,output):
 		output.print0('<path class=\"'+self.cssclass+'\" d=\"')
 		for fragment in self.fragments:
@@ -1337,7 +1892,17 @@ class FlatShape():
 			for pl in self.polylines:
 				for p in pl.points:
 					mbr.add(p.ux,p.uy)
-	def path_printsvg(self,output,cssclass,cssreverse):
+	def cutout_printsvg(self,output,cssclass):
+		svg=SvgPath(cssclass)
+		for pg in self.polygons:
+			p=pg.points[0]
+			svg.moveto(p.ux,p.uy)
+			for j in range(1,len(pg.points)):
+				p=pg.points[j]
+				svg.lineto(p.ux,p.uy)
+			svg.closepath()
+		svg.write(output)
+	def path_printsvg(self,output,cssclass,cssreverse,isforcedpixel):
 		hasreverse=False
 		svg=SvgPath(cssclass)
 		i=0
@@ -1361,7 +1926,7 @@ class FlatShape():
 				p=pg.points[j]
 				svg.lineto(p.ux,p.uy)
 			svg.closepath()
-		svg.write(output)
+		svg.write(output,isforce=isforcedpixel)
 		if hasreverse:
 			svg=SvgPath(cssreverse)
 			for i in range(1,len(self.polygons)):
@@ -1373,7 +1938,7 @@ class FlatShape():
 					p=pg.points[j]
 					svg.lineto(p.ux,p.uy)
 				svg.closepath()
-			svg.write(output)
+			svg.write(output,isforce=isforcedpixel)
 	def border_printsvg(self,output,csspatch,cssborder):
 		svg=None
 		for pg in self.polygons:
@@ -1421,9 +1986,9 @@ class FlatShape():
 						svg.addpoint(p.ux,p.uy)
 						isonpatch=True
 			if isonpatch: svg.write(output)
-	def polygon_printsvg(self,output,cssfull,csspatch,cssreverse,cssreversepatch):
+	def polygon_printsvg(self,output,cssfull,csspatch,cssreverse,cssreversepatch,isforcedpixel):
 		if True:
-			self.path_printsvg(output,cssfull,cssreverse)
+			self.path_printsvg(output,cssfull,cssreverse,isforcedpixel)
 			self.patch_printsvg(output,csspatch,cssreversepatch)
 		else: # TODO remove? this is cleaner on patches
 			if FlatShape.ispatch(self.polygons):
@@ -1437,13 +2002,33 @@ class FlatShape():
 			svg=SvgPolyline(cssclass)
 			for p in pl.points: svg.addpoint(p.ux,p.uy)
 			svg.write(output)
-	def point_printsvg(self,output,cssclass):
-		p=self.point
-		output.print('<circle class="%s" cx="%d" cy="%d" r="4"/>'%(cssclass,p.ux,p.uy))
-		
-	def printsvg(self,output,cssline='line',cssfull='full',csspatch='patch',csspoint='point',cssreverse=None,cssreversepatch=None):
+	def point_printsvg(self,output,cssclass,point=None):
+		if not point: point=self.point
+		output.countcss(cssclass)
+		output.print('<circle class="%s" cx="%d" cy="%d" r="4"/>'%(cssclass,point.ux,point.uy))
+	def pixel_printsvg(self,output,cssclass,point=None):
+		if not point: point=self.point
+		output.countcss(cssclass)
+		output.print('<rect class="%s" x="%d" y="%d" width="1" height="1"/>'%(cssclass,point.ux,point.uy))
+	def printsvg(self,output,cssline='line',cssfull='full',csspatch='patch',csspoint='point',cssforcepixel=None,
+			cssreverse=None,cssreversepatch=None,
+			isforcedpixel=False):
 		if self.type==POLYGON_TYPE_SHP:
-			self.polygon_printsvg(output,cssfull,csspatch,cssreverse,cssreversepatch)
+			if cssforcepixel:
+				others=0
+				for pg in self.polygons:
+					mbr=pg.getmbr()
+					r=mbr.getpseudoradius(180)
+					if r<2:
+						(ux,uy)=mbr.getcenter()
+						p=FlatPoint(ux,uy,0)
+						self.pixel_printsvg(output,cssforcepixel,p)
+					else:
+						others+=1
+				if others:
+					self.polygon_printsvg(output,cssfull,csspatch,cssreverse,cssreversepatch,isforcedpixel)
+			else:
+				self.polygon_printsvg(output,cssfull,csspatch,cssreverse,cssreversepatch,isforcedpixel)
 		elif self.type==POLYLINE_TYPE_SHP:
 			self.polyline_printsvg(output,cssline)
 		elif self.type==POINT_TYPE_SHP:
@@ -1815,14 +2400,15 @@ class SpherePolygon():
 		print('polygon: '+str(len(self.points))+' iscw:'+str(self.polygon.iscw),file=file)
 		for p in self.points:
 			p.print(file=file)
-			
 	def isvertex(self,lon,lat):
 		return self.polygon.isvertex(self,lon,lat)
-	def flatten(self,width,height,splitlimit):
+	def flatten(self,width,height,splitlimit,right,top):
 		r=FlatPolygon(self.polygon.iscw,self.polygon.index,self.polygon.partindex,self.polygon.ccwtype)
+		rightx2=right*2
+		topx2=top*2
 		for p in self.points:
-			p.ux=int(0.5+((p.y+1.0)*(width-1))/2.0)
-			p.uy=int(0.5+((1.0-p.z)*(height-1))/2.0)
+			p.ux=int(0.5+((p.y+right)*(width))/rightx2) # for <path>, we extend to the edge (no width-1)
+			p.uy=int(0.5+((top-p.z)*(height))/topx2)
 		i=0
 		fuse=5000 # 1000 is too few for ocean.110m on a sphere
 		while True:
@@ -1879,6 +2465,10 @@ class SpherePolygon():
 		ret=[]
 		for s in ss.list: ret.append(SpherePolygon.makefromsegments(self.polygon,self.rotation,s))
 		return ret
+	def getmbr(self):
+		mbr=Mbr()
+		for p in self.points: mbr.add(p.y,p.z)
+		return mbr
 
 class MercatorPolygon():
 	@staticmethod
@@ -1975,11 +2565,13 @@ class SpherePolyline():
 		self.points=[]
 	def print(self):
 		print('polyline: '+str(len(self.points)))
-	def flatten(self,width,height):
+	def flatten(self,width,height,right,top):
 		r=FlatPolyline()
+		rightx2=right*2
+		topx2=top*2
 		for p in self.points:
-			ux=int(0.5+((p.y+1.0)*(width-1))/2.0)
-			uy=int(0.5+((1.0-p.z)*(height-1))/2.0)
+			ux=int(0.5+((p.y+right)*(width))/rightx2) # for <path>, we extend to the edge (no width-1)
+			uy=int(0.5+((top-p.z)*(height))/topx2)
 			r.addpoint(ux,uy)
 		return r
 	def cleave(self,c):
@@ -1994,6 +2586,10 @@ class SpherePolyline():
 		ret=[]
 		for s in ss.list: ret.append(SpherePolyline.makefromsegments(self.rotation,s))
 		return ret
+	def getmbr(self):
+		mbr=Mbr()
+		for p in self.points: mbr.add(p.y,p.z)
+		return mbr
 
 class MercatorPolyline():
 	@staticmethod
@@ -2084,16 +2680,16 @@ class SphereShape():
 			raise ValueError
 	def print(self,file=sys.stdout):
 		for x in self.polygons: x.print(file=file)
-	def flatten(self,width,height,splitlimit=4):
+	def flatten(self,width,height,splitlimit=4,right=1,top=1):
 		r=FlatShape()
 		if self.type==POLYGON_TYPE_SHP:
 			r.setpolygon()
-			for x in self.polygons: r.addpolygon(x.flatten(width,height,splitlimit))
+			for x in self.polygons: r.addpolygon(x.flatten(width,height,splitlimit,right,top))
 		elif self.type==POLYLINE_TYPE_SHP:
 			r.setpolyline()
-			for x in self.polylines: r.addpolyline(x.flatten(width,height))
+			for x in self.polylines: r.addpolyline(x.flatten(width,height,right,top))
 		elif self.type==POINT_TYPE_SHP:
-			r.setpoint(self.point.flatten(width,height))
+			r.setpoint(self.point.flatten(width,height,right,top))
 		return r
 	def cleave(self,c):
 		if self.type==POLYGON_TYPE_SHP:
@@ -2113,6 +2709,16 @@ class SphereShape():
 		elif self.type==POINT_TYPE_SHP:
 			r=self.point.cleave(c)
 			if not r: self.type=NULL_TYPE_SHP
+	def getmbr(self):
+		mbr=Mbr()
+		if self.type==POLYGON_TYPE_SHP:
+			for pg in self.polygons: mbr.addmbr(pg.getmbr())
+		elif self.type==POLYLINE_TYPE_SHP:
+			for pl in self.polylines: mbr.addmbr(pl.getmbr())
+		elif self.type==POINT_TYPE_SHP:
+			mbr.add(self.point.y,self.point.z)
+		else: raise ValueError
+		return mbr
 			
 
 class WebMercatorShape():
@@ -2199,32 +2805,32 @@ class TripelShape():
 		return r
 
 def dll_sphere_print_svg(output,dll,rotation,width,height,csscircle,boxzoomcleave=None):
-	if boxzoomcleave:
-		width=width*boxzoomcleave.zoomfactor
-		height=height*boxzoomcleave.zoomfactor
 	hc=HemiCleave()
 	oneplus=ShapePlus.makefromdll(dll,0)
 	onesphere=SphereShape(oneplus,rotation)
 	hc.cleave(onesphere)
 	if boxzoomcleave: boxzoomcleave.cleave(onesphere)
 	if onesphere.type!=NULL_TYPE_SHP:
-		flatshape=onesphere.flatten(width,height)
-		if boxzoomcleave: boxzoomcleave.shift(flatshape)
+		if boxzoomcleave:
+			flatshape=boxzoomcleave.flatten(onesphere)
+		else:
+			flatshape=onesphere.flatten(width,height)
 		flatshape.printsvg(output,csspoint=csscircle)
 
-def text_sphere_print_svg(output,dll,text,rotation,width,height,cssfont='ft',cssfontshadow='fs',boxzoomcleave=None):
-	if boxzoomcleave:
-		width=width*boxzoomcleave.zoomfactor
-		height=height*boxzoomcleave.zoomfactor
+def text_sphere_print_svg(output,dll,text,rotation,width,height,cssfont=TEXT_FONT_CSS,cssfontshadow=SHADOW_FONT_CSS,boxzoomcleave=None):
 	hc=HemiCleave()
 	oneplus=ShapePlus.makefromdll(dll,0)
 	onesphere=SphereShape(oneplus,rotation)
 	hc.cleave(onesphere)
 	if boxzoomcleave: boxzoomcleave.cleave(onesphere)
 	if onesphere.type!=NULL_TYPE_SHP:
-		flatshape=onesphere.flatten(width,height)
-		if boxzoomcleave: boxzoomcleave.shift(flatshape)
+		if boxzoomcleave:
+			flatshape=boxzoomcleave.flatten(onesphere)
+		else:
+			flatshape=onesphere.flatten(width,height)
 		p=flatshape.point
+		output.countcss(cssfont)
+		output.countcss(cssfontshadow)
 		output.print('<text x="%d" y="%d" class="%s">%s</text>'%(p.ux,p.uy,cssfontshadow,text))
 		output.print('<text x="%d" y="%d" class="%s">%s</text>'%(p.ux,p.uy,cssfont,text))
 		return True
@@ -2232,9 +2838,6 @@ def text_sphere_print_svg(output,dll,text,rotation,width,height,cssfont='ft',css
 def pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit,cssline=None,cssfull=None,csspatch=None,
 		cssreverse=None,cssreversepatch=None,
 		boxzoomcleave=None, cornercleave=None):
-	if boxzoomcleave:
-		width=width*boxzoomcleave.zoomfactor
-		height=height*boxzoomcleave.zoomfactor
 	hc=HemiCleave()
 
 	for oneplus in pluses:
@@ -2243,8 +2846,10 @@ def pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit,cssli
 		if cornercleave: cornercleave.cleave(onesphere)
 		if boxzoomcleave: boxzoomcleave.cleave(onesphere)
 		if onesphere.type!=NULL_TYPE_SHP:
-			flatshape=onesphere.flatten(width,height,splitlimit)
-			if boxzoomcleave: boxzoomcleave.shift(flatshape)
+			if boxzoomcleave:
+				flatshape=boxzoomcleave.flatten(onesphere)
+			else:
+				flatshape=onesphere.flatten(width,height,splitlimit)
 	#		flatshape.print(file=sys.stdout) #ldebug
 			flatshape.printsvg(output,
 					cssline=cssline,cssfull=cssfull,csspatch=csspatch,
@@ -2257,14 +2862,58 @@ def oneplus_sphere_print_svg(output,oneplus,rotation,width,height,splitlimit,css
 		cssreverse=cssreverse,cssreversepatch=cssreversepatch,
 		boxzoomcleave=boxzoomcleave,cornercleave=cornercleave)
 
+def cutout_sphere_print_svg(output,shapes,draworder,rotation,width,height,splitlimit,cssfull=None,boxzoomcleave=None, cornercleave=None):
+	fullflat=FlatShape()
+	fullflat.setpolygon()
+	fpg=FlatPolygon(False,0,0,CUTOUT_CCWTYPE)
+	fpg.addpoint(-2,-2,0) # want to keep border outside viewbox
+	fpg.addpoint(-2,height+2,0)
+	fpg.addpoint(width+2,height+2,0)
+	fpg.addpoint(width+2,-2,0)
+	fullflat.addpolygon(fpg)
+
+	if isinstance(shapes,list):
+		pluses=[]
+		if draworder==-1:
+			for one in shapes:
+				pluses.extend(ShapePlus.make(one))
+		else:
+			for one in shapes:
+				(has,_)=one.hasdraworder(draworder)
+				if not has: continue
+				pluses.extend(ShapePlus.make(one))
+			for i in range(len(pluses)-1,-1,-1):
+				if pluses[i].draworder!=draworder: del pluses[i]
+	else:
+		pluses=ShapePlus.make(shapes) # shapes is assumed to be just a shape
+
+	hc=HemiCleave()
+	for oneplus in pluses:
+		onesphere=SphereShape(oneplus,rotation)
+		hc.cleave(onesphere)
+		if cornercleave: cornercleave.cleave(onesphere)
+		if boxzoomcleave: boxzoomcleave.cleave(onesphere)
+		if onesphere.type!=NULL_TYPE_SHP:
+			if boxzoomcleave:
+				flatshape=boxzoomcleave.flatten(onesphere)
+			else:
+				flatshape=onesphere.flatten(width,height,splitlimit)
+			for pg in flatshape.polygons: fullflat.addpolygon(pg)
+	fullflat.cutout_printsvg(output,cssfull)
+	for pg in fullflat.polygons:
+		mbr=pg.getmbr()
+		r=mbr.getpseudoradius(180)
+		if r<4:
+			(ux,uy)=mbr.getcenter()
+			p=FlatPoint(ux,uy,0)
+			FlatShape.pixel_printsvg(None,output,cssfull,p)
 
 def one_sphere_print_svg(output,one,draworder,rotation,width,height,splitlimit,cssline=None,cssfull=None,csspatch=None,
+		cssforcepixel=None,
 		cssreverse=None,cssreversepatch=None,
 		boxzoomcleave=None, cornercleave=None,
+		isforcedpixel=False,
 		islabels=False):
-	if boxzoomcleave:
-		width=width*boxzoomcleave.zoomfactor
-		height=height*boxzoomcleave.zoomfactor
 	hc=HemiCleave()
 
 	needmore=False
@@ -2276,11 +2925,13 @@ def one_sphere_print_svg(output,one,draworder,rotation,width,height,splitlimit,c
 			if cornercleave: cornercleave.cleave(onesphere)
 			if boxzoomcleave: boxzoomcleave.cleave(onesphere)
 			if onesphere.type!=NULL_TYPE_SHP:
-				flatshape=onesphere.flatten(width,height,splitlimit)
-				if boxzoomcleave: boxzoomcleave.shift(flatshape)
+				if boxzoomcleave:
+					flatshape=boxzoomcleave.flatten(onesphere)
+				else:
+					flatshape=onesphere.flatten(width,height,splitlimit)
 				flatshape.printsvg(output,
-						cssline=cssline,cssfull=cssfull,csspatch=csspatch,
-						cssreverse=cssreverse,cssreversepatch=cssreversepatch)
+						cssline=cssline,cssfull=cssfull,csspatch=csspatch,cssforcepixel=cssforcepixel,
+						cssreverse=cssreverse,cssreversepatch=cssreversepatch,isforcedpixel=isforcedpixel)
 	else:
 		(has,hasmore)=one.hasdraworder(draworder)
 		if not has:
@@ -2296,11 +2947,13 @@ def one_sphere_print_svg(output,one,draworder,rotation,width,height,splitlimit,c
 				if cornercleave: cornercleave.cleave(onesphere)
 				if boxzoomcleave: boxzoomcleave.cleave(onesphere)
 				if onesphere.type!=NULL_TYPE_SHP:
-					flatshape=onesphere.flatten(width,height,splitlimit)
-					if boxzoomcleave: boxzoomcleave.shift(flatshape)
+					if boxzoomcleave:
+						flatshape=boxzoomcleave.flatten(onesphere)
+					else:
+						flatshape=onesphere.flatten(width,height,splitlimit)
 					flatshape.printsvg(output,
-							cssline=cssline,cssfull=cssfull,csspatch=csspatch,
-							cssreverse=cssreverse,cssreversepatch=cssreversepatch)
+							cssline=cssline,cssfull=cssfull,csspatch=csspatch,cssforcepixel=cssforcepixel,
+							cssreverse=cssreverse,cssreversepatch=cssreversepatch,isforcedpixel=isforcedpixel)
 					if islabels:
 						if flatshape.type==POLYGON_TYPE_SHP:
 							pg=flatshape.polygons[0]
@@ -2398,12 +3051,24 @@ def print_roundwater_svg(output,diameter):
 	radius=diameter/2
 	rs='%.1f' % (radius)
 	output.print('<circle cx="%s" cy="%s" r="%s" fill="url(#watergradient)"/>' % (rs,rs,rs))
+def print_rectwater_svg(output,width,height,fill="#5685a2"):
+	output.print('<rect x="0" y="0" width="%d" height="%d" fill="%s"/>'%(width,height,fill))
 def print_squarewater_svg(output,length,fill="#5685a2"):
-	output.print('<rect x="0" y="0" width="%d" height="%d" fill="%s"/>'%(length,length,fill))
+	print_rectwater_svg(output,length,length,fill)
 def print_rectangle_svg(output,xoff,yoff,w,h,fill,opacity):
 	output.print('<rect x="%d" y="%d" width="%d" height="%d" fill="%s" fill-opacity="%.1f"/>'%(xoff,yoff,w,h,fill,opacity))
+def print_hypso_svg(output,width,height,hypso,isfast=False,isgradients=False):
+	output.print0('<image x="0" y="0" width="%d" height="%d" xlink:href="data:image/png;base64,'%(width,height))
+	if isverbose_global: print('Compressing png (isfast:%s)'%isfast,file=sys.stderr)
+	b=hypso.getpng(isfast=isfast,ismime=True)
+	output.print0(b)
+	output.print('" />')
+	if isgradients:
+		radius=width/2
+		rs='%.1f' % (radius)
+		output.print('<circle cx="%s" cy="%s" r="%s" fill="url(#sungradient)"/>' % (rs,rs,rs))
 
-def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=None,isgradients=False):
+def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=None,isgradients=False,ishypso=None):
 	half=int(width/2)
 	output.print('<?xml version="1.0" encoding="UTF-8" standalone="no"?>')
 	output.print('<svg xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="%d" width="%d">' % (height,width))
@@ -2412,60 +3077,82 @@ def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=Non
 		for comment in comments:
 			print_comment_svg(output,comment)
 
-	if isgradients:
-		output.print('<defs>')
-		output.print('	<radialGradient id="watergradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
-		output.print('		<stop offset="0%" stop-color="#70add3"/>')
-		output.print('		<stop offset="11%" stop-color="#6eaad0"/>')
-		output.print('		<stop offset="22%" stop-color="#6ca7cc"/>')
-		output.print('		<stop offset="31%" stop-color="#6ba5c9"/>')
-		output.print('		<stop offset="41%" stop-color="#69a2c6"/>')
-		output.print('		<stop offset="51%" stop-color="#679fc2"/>')
-		output.print('		<stop offset="59%" stop-color="#669dbf"/>')
-		output.print('		<stop offset="67%" stop-color="#649abc"/>')
-		output.print('		<stop offset="75%" stop-color="#6297b9"/>')
-		output.print('		<stop offset="81%" stop-color="#6095b6"/>')
-		output.print('		<stop offset="87%" stop-color="#5f92b2"/>')
-		output.print('		<stop offset="92%" stop-color="#5d8faf"/>')
-		output.print('		<stop offset="95%" stop-color="#5b8dac"/>')
-		output.print('		<stop offset="98%" stop-color="#598aa8"/>')
-		output.print('		<stop offset="100%" stop-color="#5685a2"/>')
-		output.print('	</radialGradient>')
-		output.print('	<radialGradient id="landgradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
-		output.print('		<stop offset="0%" stop-color="#dddddd"/>')
-		output.print('		<stop offset="11%" stop-color="#d7d7d7"/>')
-		output.print('		<stop offset="22%" stop-color="#d1d1d1"/>')
-		output.print('		<stop offset="31%" stop-color="#cccccc"/>')
-		output.print('		<stop offset="41%" stop-color="#c6c6c6"/>')
-		output.print('		<stop offset="51%" stop-color="#c0c0c0"/>')
-		output.print('		<stop offset="59%" stop-color="#bbbbbb"/>')
-		output.print('		<stop offset="67%" stop-color="#b5b5b5"/>')
-		output.print('		<stop offset="75%" stop-color="#afafaf"/>')
-		output.print('		<stop offset="81%" stop-color="#aaaaaa"/>')
-		output.print('		<stop offset="87%" stop-color="#a4a4a4"/>')
-		output.print('		<stop offset="92%" stop-color="#9e9e9e"/>')
-		output.print('		<stop offset="95%" stop-color="#999999"/>')
-		output.print('		<stop offset="98%" stop-color="#939393"/>')
-		output.print('		<stop offset="100%" stop-color="#888888"/>')
-		output.print('	</radialGradient>')
-		output.print('	<radialGradient id="bordergradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
-		output.print('		<stop offset="0%" stop-color="#444444"/>')
-		output.print('		<stop offset="11%" stop-color="#3f3f3f"/>')
-		output.print('		<stop offset="22%" stop-color="#3a3a3a"/>')
-		output.print('		<stop offset="31%" stop-color="#363636"/>')
-		output.print('		<stop offset="41%" stop-color="#323232"/>')
-		output.print('		<stop offset="51%" stop-color="#2d2d2d"/>')
-		output.print('		<stop offset="59%" stop-color="#292929"/>')
-		output.print('		<stop offset="67%" stop-color="#242424"/>')
-		output.print('		<stop offset="75%" stop-color="#1f1f1f"/>')
-		output.print('		<stop offset="81%" stop-color="#1b1b1b"/>')
-		output.print('		<stop offset="87%" stop-color="#161616"/>')
-		output.print('		<stop offset="92%" stop-color="#121212"/>')
-		output.print('		<stop offset="95%" stop-color="#0e0e0e"/>')
-		output.print('		<stop offset="98%" stop-color="#090909"/>')
-		output.print('		<stop offset="100%" stop-color="#000000"/>')
-		output.print('	</radialGradient>')
-		output.print('</defs>')
+	if ishypso:
+		if isgradients:
+			output.print('<defs>')
+			output.print('	<radialGradient id="sungradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
+			output.print('		<stop offset="0%" stop-color="#000000" stop-opacity="0.00"/>')
+			output.print('		<stop offset="11%" stop-color="#000000" stop-opacity="0.03"/>')
+			output.print('		<stop offset="22%" stop-color="#000000" stop-opacity="0.07"/>')
+			output.print('		<stop offset="31%" stop-color="#000000" stop-opacity="0.10"/>')
+			output.print('		<stop offset="41%" stop-color="#000000" stop-opacity="0.14"/>')
+			output.print('		<stop offset="51%" stop-color="#000000" stop-opacity="0.17"/>')
+			output.print('		<stop offset="59%" stop-color="#000000" stop-opacity="0.20"/>')
+			output.print('		<stop offset="67%" stop-color="#000000" stop-opacity="0.23"/>')
+			output.print('		<stop offset="75%" stop-color="#000000" stop-opacity="0.27"/>')
+			output.print('		<stop offset="81%" stop-color="#000000" stop-opacity="0.30"/>')
+			output.print('		<stop offset="87%" stop-color="#000000" stop-opacity="0.33"/>')
+			output.print('		<stop offset="92%" stop-color="#000000" stop-opacity="0.37"/>')
+			output.print('		<stop offset="95%" stop-color="#000000" stop-opacity="0.40"/>')
+			output.print('		<stop offset="98%" stop-color="#000000" stop-opacity="0.43"/>')
+			output.print('		<stop offset="100%" stop-color="#000000" stop-opacity="0.50"/>')
+			output.print('	</radialGradient>')
+			output.print('</defs>')
+	else:
+		if isgradients:
+			output.print('<defs>')
+			output.print('	<radialGradient id="watergradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
+			output.print('		<stop offset="0%" stop-color="#70add3"/>')
+			output.print('		<stop offset="11%" stop-color="#6eaad0"/>')
+			output.print('		<stop offset="22%" stop-color="#6ca7cc"/>')
+			output.print('		<stop offset="31%" stop-color="#6ba5c9"/>')
+			output.print('		<stop offset="41%" stop-color="#69a2c6"/>')
+			output.print('		<stop offset="51%" stop-color="#679fc2"/>')
+			output.print('		<stop offset="59%" stop-color="#669dbf"/>')
+			output.print('		<stop offset="67%" stop-color="#649abc"/>')
+			output.print('		<stop offset="75%" stop-color="#6297b9"/>')
+			output.print('		<stop offset="81%" stop-color="#6095b6"/>')
+			output.print('		<stop offset="87%" stop-color="#5f92b2"/>')
+			output.print('		<stop offset="92%" stop-color="#5d8faf"/>')
+			output.print('		<stop offset="95%" stop-color="#5b8dac"/>')
+			output.print('		<stop offset="98%" stop-color="#598aa8"/>')
+			output.print('		<stop offset="100%" stop-color="#5685a2"/>')
+			output.print('	</radialGradient>')
+			output.print('	<radialGradient id="landgradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
+			output.print('		<stop offset="0%" stop-color="#dddddd"/>')
+			output.print('		<stop offset="11%" stop-color="#d7d7d7"/>')
+			output.print('		<stop offset="22%" stop-color="#d1d1d1"/>')
+			output.print('		<stop offset="31%" stop-color="#cccccc"/>')
+			output.print('		<stop offset="41%" stop-color="#c6c6c6"/>')
+			output.print('		<stop offset="51%" stop-color="#c0c0c0"/>')
+			output.print('		<stop offset="59%" stop-color="#bbbbbb"/>')
+			output.print('		<stop offset="67%" stop-color="#b5b5b5"/>')
+			output.print('		<stop offset="75%" stop-color="#afafaf"/>')
+			output.print('		<stop offset="81%" stop-color="#aaaaaa"/>')
+			output.print('		<stop offset="87%" stop-color="#a4a4a4"/>')
+			output.print('		<stop offset="92%" stop-color="#9e9e9e"/>')
+			output.print('		<stop offset="95%" stop-color="#999999"/>')
+			output.print('		<stop offset="98%" stop-color="#939393"/>')
+			output.print('		<stop offset="100%" stop-color="#888888"/>')
+			output.print('	</radialGradient>')
+			output.print('	<radialGradient id="bordergradient" cx="%d" cy="%d" r="%d" fx="%d" fy="%d" gradientUnits="userSpaceOnUse">'%(half,half,half,half,half))
+			output.print('		<stop offset="0%" stop-color="#444444"/>')
+			output.print('		<stop offset="11%" stop-color="#3f3f3f"/>')
+			output.print('		<stop offset="22%" stop-color="#3a3a3a"/>')
+			output.print('		<stop offset="31%" stop-color="#363636"/>')
+			output.print('		<stop offset="41%" stop-color="#323232"/>')
+			output.print('		<stop offset="51%" stop-color="#2d2d2d"/>')
+			output.print('		<stop offset="59%" stop-color="#292929"/>')
+			output.print('		<stop offset="67%" stop-color="#242424"/>')
+			output.print('		<stop offset="75%" stop-color="#1f1f1f"/>')
+			output.print('		<stop offset="81%" stop-color="#1b1b1b"/>')
+			output.print('		<stop offset="87%" stop-color="#161616"/>')
+			output.print('		<stop offset="92%" stop-color="#121212"/>')
+			output.print('		<stop offset="95%" stop-color="#0e0e0e"/>')
+			output.print('		<stop offset="98%" stop-color="#090909"/>')
+			output.print('		<stop offset="100%" stop-color="#000000"/>')
+			output.print('	</radialGradient>')
+			output.print('</defs>')
 	output.print('<style type="text/css">')
 	output.print('<![CDATA[')
 
@@ -2478,177 +3165,172 @@ def print_header_svg(output,width,height,opts,labelfont='14px sans',comments=Non
 	highlight_b='#000000'
 	highlight_tb='#378100'
 
-	if 'tc' in opts: output.print('.tc {stroke:black;fill-opacity:0}')
-	if not isgradients:
-		if 'sl' in opts: output.print('.sl {fill:#aaaaaa;stroke:#888888}')
-		if 'sp' in opts: output.print('.sp {stroke:#aaaaaa;fill-opacity:0}')
-		if 'sb' in opts: output.print('.sb {stroke:#888888;fill-opacity:0}')
-		if 'sw' in opts: output.print('.sw {fill:#5685a2;stroke-opacity:0}')
-		if 'sr' in opts: output.print('.sr {stroke:#5685a2;fill-opacity:0}')
-	else:
-		if 'sl' in opts: output.print('.sl {fill:url(#landgradient);stroke:url(#bordergradient)}')
-		if 'sp' in opts: output.print('.sp {stroke:url(#landgradient);fill-opacity:0}')
-		if 'sb' in opts: output.print('.sb {stroke:url(#bordergradient);fill-opacity:0}')
-		if 'sw' in opts: output.print('.sw {fill:url(#watergradient);stroke:url(#watergradient);stroke-opacity:0.8}')
-		if 'sr' in opts: output.print('.sr {stroke:url(#watergradient);fill-opacity:0}')
-	if 'si' in opts: output.print('.si {stroke:%s;fill-opacity:0;stroke-opacity:0.3}'%highlight_b)
-	if 'sh' in opts: output.print('.sh {fill:%s;stroke:%s}'%(highlight,highlight_b))
-	if 'sq' in opts: output.print('.sq {stroke:%s;fill-opacity:0}'%highlight)
-	if 'sh1' in opts: output.print('.sh1 {fill:%s;stroke:%s}'%(highlight,highlight_b))
-	if 'sq1' in opts: output.print('.sq1 {stroke:%s;fill-opacity:0}'%highlight)
+	css=[]
 
-	# halflight areas
-# 7aaa58
-# aaaa11
-	if 'al' in opts: output.print('.al {fill:#aaaa11;stroke:#707070}')
-	if 'ap' in opts: output.print('.ap {stroke:#aaaa11;fill-opacity:0}')
-	if 'ab' in opts: output.print('.ab {stroke:#707070;fill-opacity:0}')
+	if not ishypso:
+		if not isgradients:
+			if LAND_SPHERE_CSS in opts: css.append('.sl {fill:#aaaaaa;stroke:#888888}')
+			if PATCH_LAND_SPHERE_CSS in opts: css.append('.sp {stroke:#aaaaaa;fill-opacity:0}')
+			if BORDER_SPHERE_CSS in opts: css.append('.sb {stroke:#888888;fill-opacity:0}')
+			if WATER_SPHERE_CSS in opts: css.append('.sw {fill:#5685a2;stroke-opacity:0}')
+			if PATCH_WATER_SPHERE_CSS in opts: css.append('.sr {stroke:#5685a2;fill-opacity:0}')
+		else:
+			if LAND_SPHERE_CSS in opts: css.append('.sl {fill:url(#landgradient);stroke:url(#bordergradient)}')
+			if PATCH_LAND_SPHERE_CSS in opts: css.append('.sp {stroke:url(#landgradient);fill-opacity:0}')
+			if BORDER_SPHERE_CSS in opts: css.append('.sb {stroke:url(#bordergradient);fill-opacity:0}')
+			if WATER_SPHERE_CSS in opts: css.append('.sw {fill:url(#watergradient);stroke:url(#watergradient);stroke-opacity:0.8}')
+			if PATCH_WATER_SPHERE_CSS in opts: css.append('.sr {stroke:url(#watergradient);fill-opacity:0}')
+		if HIGH_BORDER_SPHERE_CSS in opts: css.append('.si {stroke:%s;fill-opacity:0;stroke-opacity:0.3}'%highlight_b)
+		if HIGH_LAND_SPHERE_CSS in opts: css.append('.sh {fill:%s;stroke:%s}'%(highlight,highlight_b))
+		if PATCH_HIGH_LAND_SPHERE_CSS in opts: css.append('.sq {stroke:%s;fill-opacity:0}'%highlight)
 
-	# disputed and breakaway areas
-	if 'dl' in opts: output.print('.dl {fill:#11dd11;stroke:#11dd11;stroke-dasharray:3 3}')
-	# disputed border
-	if 'db' in opts: output.print('.db {fill:#11dd11;stroke:#11dd11;stroke-width:2;stroke-opacity:1}')
-	if 'dp' in opts: output.print('.dp {stroke:#11dd11;fill-opacity:0}')
-	# zoom land
-	if 'dz' in opts: output.print('.dz {fill:#11dd11;stroke:#000000;stroke-dasharray:2 2}')
+		# halflight areas
+	# 7aaa58
+	# aaaa11
+		if AREA_LAND_SPHERE_CSS in opts: css.append('.al {fill:#aaaa11;stroke:#707070}')
+		if PATCH_AREA_LAND_SPHERE_CSS in opts: css.append('.ap {stroke:#aaaa11;fill-opacity:0}')
+		if AREA_BORDER_SPHERE_CSS in opts: css.append('.ab {stroke:#707070;fill-opacity:0}')
+		if AREA_LAKELINE_SPHERE_CSS in opts: css.append('.ai {stroke:#707070;fill-opacity:0;stroke-opacity:0.3}')
+
+		# disputed and breakaway areas
+		if DISPUTED_LAND_SPHERE_CSS in opts: css.append('.dl {fill:#11dd11;stroke:#11dd11;stroke-dasharray:1 1}')
+		# disputed border
+		if DISPUTED_BORDER_SPHERE_CSS in opts: css.append('.db {fill:#11dd11;stroke:#11dd11;stroke-opacity:1}')
+		if PATCH_DISPUTED_LAND_SPHERE_CSS in opts: css.append('.dp {stroke:#11dd11;fill-opacity:0}')
+		# sphere lon/lat grid
+		if GRID_SPHERE_CSS in opts: css.append('.sg {stroke:#000000;fill-opacity:0.0;stroke-opacity:0.2}')
+
+	else: # hypso
+		if HYPSOCUT_SPHERE_CSS in opts:
+			if not isgradients:
+				css.append('.hc {stroke:#ffffff;fill:#000000;fill-opacity:0.35}')
+				if LAND_SPHERE_CSS in opts: css.append('.sl {stroke:#ffffff;fill:#000000;fill-opacity:0.25;stroke-opacity:0.5}')
+				if BORDER_SPHERE_CSS in opts: css.append('.sb {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.5}')
+			else:
+				css.append('.hc {stroke:#ffffff;fill:#000000;fill-opacity:0.2}')
+				if LAND_SPHERE_CSS in opts: css.append('.sl {stroke:#ffffff;fill:#000000;fill-opacity:0.1;stroke-opacity:0.3}')
+				if BORDER_SPHERE_CSS in opts: css.append('.sb {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.3}')
+		else:
+			if LAND_SPHERE_CSS in opts: css.append('.sl {stroke:#ffffff;stroke-opacity:0.7;fill:#000000;fill-opacity:0.5}')
+			if BORDER_SPHERE_CSS in opts: css.append('.sb {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.7}')
+		if PATCH_LAND_SPHERE_CSS in opts: css.append('.sp {stroke:#ffffff;fill-opacity:0;stroke-dasharray:3 3}')
+		if WATER_SPHERE_CSS in opts: css.append('.sw {fill:#5685a2;stroke-opacity:0}')
+		if PATCH_WATER_SPHERE_CSS in opts: css.append('.sr {stroke:#5685a2;fill-opacity:0}')
+		if HIGH_BORDER_SPHERE_CSS in opts: css.append('.si {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.5}')
+		if HIGH_LAND_SPHERE_CSS in opts: css.append('.sh {fill:#ffffff;stroke:#ffffff;fill-opacity:0;stroke-opacity:0.8}')
+		if PATCH_HIGH_LAND_SPHERE_CSS in opts: css.append('.sq {stroke:#ffffff;fill-opacity:0;stroke-dasharray:3 3}')
+
+		# halflight areas
+	# 7aaa58
+	# aaaa11
+		if AREA_LAND_SPHERE_CSS in opts: css.append('.al {stroke:#000000;fill-opacity:0}')
+		if PATCH_AREA_LAND_SPHERE_CSS in opts: css.append('.ap {stroke:#ffffff;fill-opacity:0;stroke-dasharray:3 3}')
+		if AREA_BORDER_SPHERE_CSS in opts: css.append('.ab {stroke:#000000;fill-opacity:0}')
+		if AREA_LAKELINE_SPHERE_CSS in opts: css.append('.ai {stroke:#707070;fill-opacity:0;stroke-opacity:0.8}')
+
+		# disputed and breakaway areas
+		if DISPUTED_LAND_SPHERE_CSS in opts: css.append('.dl {fill:#11dd11;stroke:#11dd11}')
+		# disputed border
+		if DISPUTED_BORDER_SPHERE_CSS in opts: css.append('.db {fill:#11dd11;stroke:#11dd11}')
+		if PATCH_DISPUTED_LAND_SPHERE_CSS in opts: css.append('.dp {stroke:#11dd11;fill-opacity:0}')
+		# sphere lon/lat grid
+		if GRID_SPHERE_CSS in opts: css.append('.sg {stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.3}')
+
+
+
+	# disputed zoom land
+	if DISPUTED_LAND_ZOOM_CSS in opts: css.append('.dz {fill:#11dd11;stroke:#11dd11;stroke-dasharray:2 2}')
 	# zoom border
-	if 'dy' in opts: output.print('.dy {fill:#11dd11;stroke-opacity:0}')
+	if DISPUTED_BORDER_ZOOM_CSS in opts: css.append('.dy {fill:#11dd11;stroke:#11dd11;stroke-opacity:1}')
 	# zoom patch
-	if 'dx' in opts: output.print('.dx {stroke:#11dd11;stroke-dasharray:3 3;fill-opacity:0}')
-
-	# sphere lon/lat grid
-	if 'sg' in opts: output.print('.sg {stroke:#000000;fill-opacity:0.0;stroke-opacity:0.2}')
+	if PATCH_DISPUTED_LAND_ZOOM_CSS in opts: css.append('.dx {stroke:#11dd11;stroke-dasharray:3 3;fill-opacity:0}')
 
 	# font lon/lat shadow
-	if 'fs' in opts: output.print('.fs { font:%s;fill:none;fill-opacity:1;stroke:#ffffff;stroke-width:2px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:0.9;text-anchor:middle }'%labelfont)
+	if SHADOW_FONT_CSS in opts: css.append('.fs { font:%s;fill:none;fill-opacity:1;stroke:#ffffff;stroke-width:2px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:0.9;text-anchor:middle }'%labelfont)
 	# font lon/lat text
-	if 'ft' in opts: output.print('.ft { font:%s;fill:#000000;fill-opacity:1;stroke-opacity:0;text-anchor:middle }'%labelfont) 
+	if TEXT_FONT_CSS in opts: css.append('.ft { font:%s;fill:#000000;fill-opacity:1;stroke-opacity:0;text-anchor:middle }'%labelfont) 
 
-
+	# for mercator, this should probably be updated
+	if COAST_TRIPEL_CSS in opts: css.append('.tc {stroke:black;fill-opacity:0}')
 	# tripel ocean
-	if 'to' in opts:
-		output.print('.to {fill:#eeeeee;stroke:black}')
-		if 'tb' in opts: output.print('.tb {fill:#aaaaaa;stroke:black;stroke-width:2}') # tripel background
+	if OCEAN_TRIPEL_CSS in opts:
+		css.append('.to {fill:#eeeeee;stroke:black}')
+		if BACK_TRIPEL_CSS in opts: css.append('.tb {fill:#aaaaaa;stroke:black;stroke-width:2}') # tripel background
 	# tripel land
-	if 'tl' in opts:
-		output.print('.tl {fill:#aaaaaa;stroke:black}')
-		if 'tb' in opts: output.print('.tb {fill:#eeeeee;stroke:black;stroke-width:2}') # tripel background
+	if LAND_TRIPEL_CSS in opts:
+		css.append('.tl {fill:#aaaaaa;stroke:black}')
+		if ishypso:
+			if isgradients:
+				if BACK_TRIPEL_CSS in opts: css.append('.tb {fill:#bbbbbb;stroke:black;stroke-width:2}') # tripel background
+			else:
+				if BACK_TRIPEL_CSS in opts: css.append('.tb {fill:#cccccc;stroke:black;stroke-width:2}') # tripel background # TODO
+		else:
+			if BACK_TRIPEL_CSS in opts: css.append('.tb {fill:#eeeeee;stroke:black;stroke-width:2}') # tripel background
 
 	# tripel lon/lat
-	if 'tg' in opts: output.print('.tg {stroke:black;stroke-opacity:0.2;fill-opacity:0}')
-	if 'tl1' in opts: output.print('.tl1 {fill:#dddddd;stroke:#444444}')
+	if GRID_TRIPEL_CSS in opts: css.append('.tg {stroke:black;stroke-opacity:0.2;fill-opacity:0}')
+	if 'tl1' in opts: css.append('.tl1 {fill:#dddddd;stroke:#444444}')
 	# tripel patch
-	if 'tp' in opts: output.print('.tp {stroke:#dddddd;fill-opacity:0}')
-	if 'tp1' in opts: output.print('.tp1 {stroke:#dddddd;fill-opacity:0}')
+	if PATCH_LAND_TRIPEL_CSS in opts: css.append('.tp {stroke:#dddddd;fill-opacity:0}')
+	if 'tp1' in opts: css.append('.tp1 {stroke:#dddddd;fill-opacity:0}')
 	# trip highlight
-	if 'th' in opts: output.print('.th {fill:%s;stroke:%s}'%(highlight,highlight_tb))
-	if 'tq' in opts: output.print('.tq {stroke:%s;fill-opacity:0}'%highlight)
+	if HIGH_LAND_TRIPEL_CSS in opts: css.append('.th {fill:%s;stroke:%s}'%(highlight,highlight_tb))
+	if PATCH_HIGH_LAND_TRIPEL_CSS in opts: css.append('.tq {stroke:%s;fill-opacity:0}'%highlight)
 
-	# zoom land
-	if 'zl' in opts: output.print('.zl {fill:#dddddd;stroke:#444444}')
-	# zoom patch
-	if 'zp' in opts: output.print('.zp {stroke:#dddddd;stroke-dasharray:3 3;fill-opacity:0}')
+	if ishypso:
+		# zoom land
+		if LAND_ZOOM_CSS in opts: css.append('.zl {fill:#cccccc;stroke:#444444}')
+		# zoom patch
+		if PATCH_LAND_ZOOM_CSS in opts: css.append('.zp {stroke:#cccccc;stroke-dasharray:3 3;fill-opacity:0}')
+	else:
+		# zoom land
+		if LAND_ZOOM_CSS in opts: css.append('.zl {fill:#dddddd;stroke:#444444}')
+		# zoom patch
+		if PATCH_LAND_ZOOM_CSS in opts: css.append('.zp {stroke:#dddddd;stroke-dasharray:3 3;fill-opacity:0}')
 	# zoom border
-	if 'zb' in opts: output.print('.zb {stroke:#444444;fill-opacity:0}')
-	if 'debugzp' in opts: output.print('.debugzp {stroke:#00ff00;stroke-dasharray:3 3;stroke-width:2;fill-opacity:0}')
+	if BORDER_ZOOM_CSS in opts: css.append('.zb {stroke:#444444;fill-opacity:0}')
+	if 'debugzp' in opts: css.append('.debugzp {stroke:#00ff00;stroke-dasharray:3 3;stroke-width:2;fill-opacity:0}')
 	# zoom highlight
-	if 'zh' in opts: output.print('.zh {fill:%s;stroke:%s}'%(highlight,highlight_bz))
+	if HIGH_LAND_ZOOM_CSS in opts: css.append('.zh {fill:%s;stroke:%s}'%(highlight,highlight_bz))
 	# zoom highlight patch
-	if 'zq' in opts: output.print('.zq {stroke:%s;stroke-dasharray:3 3;fill-opacity:0}'%highlight)
-#	if 'zw' in opts: output.print('.zw {fill:#5685a2;stroke-opacity:0}')
-	if 'zi' in opts: output.print('.zi {stroke:%s;fill-opacity:0;stroke-opacity:0.5}'%(highlight_bz))
+	if PATCH_HIGH_LAND_ZOOM_CSS in opts: css.append('.zq {stroke:%s;stroke-dasharray:3 3;fill-opacity:0}'%highlight)
+#	if WATER_ZOOM_CSS in opts: css.append('.zw {fill:#5685a2;stroke-opacity:0}')
+	if HIGH_LAKELINE_ZOOM_CSS in opts: css.append('.zi {stroke:%s;fill-opacity:0;stroke-opacity:0.5}'%(highlight_bz))
 # 0x64a8d2 * 0.9 + 0.1 * 0xdddddd = 0x70add3
-	if 'zw' in opts: output.print('.zw {fill:#64a8d2;fill-opacity:0.9;stroke-opacity:0.9}')
-	if 'zr' in opts: output.print('.zr {stroke:#5685a2;stroke-dasharray:3 3;fill-opacity:0}')
 
-	if 'debugl' in opts: output.print('.debugl {stroke:#00ff00;fill-opacity:0;stroke-width:1}')
-	if 'debuggreen' in opts: output.print('.debuggreen {stroke:#00ff00;fill:#005500}')
-	if 'debugredline' in opts: output.print('.debugredline {stroke:#ff0000;fill-opacity:0}')
+	if ishypso:
+		if WATER_ZOOM_CSS in opts: css.append('.zw {fill:#5685a2;fill-opacity:0.9;stroke-opacity:0.9}')
+		if PATCH_WATER_ZOOM_CSS in opts: css.append('.zr {stroke:#5685a2;stroke-dasharray:3 3;fill-opacity:0}')
+	else:
+		if WATER_ZOOM_CSS in opts: css.append('.zw {fill:#64a8d2;fill-opacity:0.9;stroke-opacity:0.9}')
+		if PATCH_WATER_ZOOM_CSS in opts: css.append('.zr {stroke:#5685a2;stroke-dasharray:3 3;fill-opacity:0}')
+
+	if 'debugl' in opts: css.append('.debugl {stroke:#00ff00;fill-opacity:0;stroke-width:1}')
+	if 'debuggreen' in opts: css.append('.debuggreen {stroke:#00ff00;fill:#005500}')
+	if 'debugred' in opts: css.append('.debugred {stroke:#ff0000;fill:#550000}')
+	if 'debugredline' in opts: css.append('.debugredline {stroke:#ff0000;fill-opacity:0}')
 
 	if width==500: # circles
-		if 'c1' in opts: output.print('.c1 {stroke:%s;fill-opacity:0}'%highlight)
-		if 'c2' in opts: output.print('.c2 {stroke:%s;fill-opacity:0}'%highlight)
-		if 'c3' in opts: output.print('.c3 {stroke:%s;fill-opacity:0;stroke-width:1.5}'%highlight)
-		if 'c4' in opts: output.print('.c4 {stroke:%s;fill-opacity:0;stroke-width:2}'%highlight)
-		if 'w1' in opts: output.print('.w1 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
-		if 'w2' in opts: output.print('.w2 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
-		if 'w3' in opts: output.print('.w3 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:1.5}')
-		if 'w4' in opts: output.print('.w4 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:2}')
+		if ONE_CIRCLE_CSS in opts: css.append('.c1 {stroke:%s;fill-opacity:0}'%highlight)
+		if TWO_CIRCLE_CSS in opts: css.append('.c2 {stroke:%s;fill-opacity:0}'%highlight)
+		if THREE_CIRCLE_CSS in opts: css.append('.c3 {stroke:%s;fill-opacity:0;stroke-width:1.5}'%highlight)
+		if FOUR_CIRCLE_CSS in opts: css.append('.c4 {stroke:%s;fill-opacity:0;stroke-width:2}'%highlight)
+		if SHADOW_ONE_CIRCLE_CSS in opts: css.append('.w1 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
+		if SHADOW_TWO_CIRCLE_CSS in opts: css.append('.w2 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
+		if SHADOW_THREE_CIRCLE_CSS in opts: css.append('.w3 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:1.5}')
+		if SHADOW_FOUR_CIRCLE_CSS in opts: css.append('.w4 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:2}')
 	else:
-		if 'c1' in opts: output.print('.c1 {stroke:%s;fill-opacity:0}'%highlight)
-		if 'c2' in opts: output.print('.c2 {stroke:%s;fill-opacity:0;stroke-width:2}'%highlight)
-		if 'c3' in opts: output.print('.c3 {stroke:%s;fill-opacity:0;stroke-width:3}'%highlight)
-		if 'c4' in opts: output.print('.c4 {stroke:%s;fill-opacity:0;stroke-width:4}'%highlight)
-		if 'w1' in opts: output.print('.w1 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
-		if 'w2' in opts: output.print('.w2 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:2}')
-		if 'w3' in opts: output.print('.w3 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:3}')
-		if 'w4' in opts: output.print('.w4 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:4}')
+		if ONE_CIRCLE_CSS in opts: css.append('.c1 {stroke:%s;fill-opacity:0}'%highlight)
+		if TWO_CIRCLE_CSS in opts: css.append('.c2 {stroke:%s;fill-opacity:0;stroke-width:2}'%highlight)
+		if THREE_CIRCLE_CSS in opts: css.append('.c3 {stroke:%s;fill-opacity:0;stroke-width:3}'%highlight)
+		if FOUR_CIRCLE_CSS in opts: css.append('.c4 {stroke:%s;fill-opacity:0;stroke-width:4}'%highlight)
+		if SHADOW_ONE_CIRCLE_CSS in opts: css.append('.w1 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6}')
+		if SHADOW_TWO_CIRCLE_CSS in opts: css.append('.w2 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:2}')
+		if SHADOW_THREE_CIRCLE_CSS in opts: css.append('.w3 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:3}')
+		if SHADOW_FOUR_CIRCLE_CSS in opts: css.append('.w4 {stroke:#ffffff;fill-opacity:0;stroke-opacity:0.6;stroke-width:4}')
 
-	if False:
-		output.print('text.shadow { font:%s;fill:none;fill-opacity:1;stroke:#ffffff;stroke-width:2px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:0.9;text-anchor:middle }'%labelfont)
-		output.print('text.label { font:%s;fill:#000000;fill-opacity:1;stroke-opacity:0;text-anchor:middle }'%labelfont) 
-		output.print('path.land { fill:url(#landgradient);stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.land_border { stroke:url(#bordergradient);fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.land_patch { stroke:#888888;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.land_full { fill:url(#landgradient);stroke:url(#bordergradient);fill-opacity:1.0;stroke-opacity:1.0 }')
-		if issubland:
-			output.print('path.subland { fill:#449944;stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-			output.print('path.subland_full { fill:#449944;stroke:#338833;fill-opacity:1.0;stroke-opacity:1.0 }')
-			output.print('path.subland_border { stroke:#338833;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-			output.print('path.subland_patch { stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-
-		if width==500:
-			output.print('circle.highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1 }')
-			output.print('circle.w2_highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1 }')
-			output.print('circle.w3_highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.5 }')
-			output.print('circle.w4_highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:2 }')
-			output.print('circle.w_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:1 }')
-			output.print('circle.w_w2_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:1 }')
-			output.print('circle.w_w3_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:1.5 }')
-			output.print('circle.w_w4_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:2 }')
-		else:
-			output.print('circle.highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0 }')
-			output.print('circle.w2_highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:2 }')
-			output.print('circle.w3_highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:3 }')
-			output.print('circle.w4_highlight_land { fill:#449944;stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:4 }')
-			output.print('circle.w_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6 }')
-			output.print('circle.w_w2_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:2 }')
-			output.print('circle.w_w3_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:3 }')
-			output.print('circle.w_w4_highlight_land { fill:#449944;stroke:#ffffff;fill-opacity:0.0;stroke-opacity:0.6;stroke-width:4 }')
-
-		output.print('path.highlight_land { fill:#449944;stroke:#000000;fill-opacity:0.0;stroke-opacity:0.0 }')
-		output.print('path.highlight_land_full { fill:#449944;stroke:#115511;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.highlight_land_border { stroke:#115511;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.highlight_land_patch { stroke:#449944;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.highlight2_land { fill:#449944;stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.highlight2_land_full { fill:#449944;stroke:#115511;fill-opacity:1.0;stroke-opacity:1.0 }')
-		output.print('path.highlight2_land_border { stroke:#115511;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.highlight2_land_patch { stroke:#115511;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.water { fill:url(#watergradient);stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.water_full { fill:url(#watergradient);stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.water_border { stroke:url(#watergradient);fill-opacity:0.0;stroke-opacity:0.5;stroke-width:1.0 }')
-		output.print('path.water_patch { stroke:url(#watergradient);fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.lonlat { stroke:#000000;fill-opacity:0.0;stroke-opacity:0.2;stroke-width:1.0 }')
-		if False:
-			output.print('path.landline { stroke:#000000;fill-opacity:0.0;stroke-opacity:0.8;stroke-width:0.5 }')
-		output.print('path.landz { fill:#dddddd;stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.landz_full { fill:#dddddd;stroke:#444444;fill-opacity:1.0;stroke-opacity:1.0 }')
-		output.print('path.landz_border { stroke:#444444;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.landz_patch { stroke-dasharray:"3 3";stroke:#000000;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.outline { fill:#eeeeee;stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.outline_full { fill:#eeeeee;stroke:#000000;fill-opacity:1.0;stroke-opacity:0.0 }')
-		output.print('path.outline_border { stroke:#000000;fill-opacity:0.0;stroke-opacity:0.0;stroke-width:1.0 }')
-		output.print('path.outline_patch { stroke:#000000;fill-opacity:0.0;stroke-opacity:0.0;stroke-width:1.0 }')
-		output.print('path.landx { fill:#aaaaaa;stroke:#000000;fill-opacity:1.0;stroke-opacity:1.0 }')
-		output.print('path.landx_full { fill:#aaaaaa;stroke:#aaaaaa;fill-opacity:1.0;stroke-opacity:1.0 }')
-		output.print('path.landx_border { stroke:#aaaaaa;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.landx_patch { stroke:#aaaaaa;fill-opacity:0.0;stroke-opacity:1.0;stroke-width:1.0 }')
-		output.print('path.lonlat3 { stroke:#000000;fill-opacity:0.0;stroke-opacity:0.2;stroke-width:1.0 }')
-		if False:
-			output.print('path.worldborder { fill:#000000;stroke:#000000;fill-opacity:0.0;stroke-opacity:1.0 }')
-		output.print('path.worldbg_full { fill:#aaaaaa;stroke:#000000;fill-opacity:1.0;stroke-opacity:1.0;stroke-width:2 }')
-		output.print('path.world_full { fill:#eeeeee;stroke:#000000;fill-opacity:1.0;stroke-opacity:1.0 }')
-	
+	css.sort()
+	for c in css: output.print(c)
 	output.print(']]>')
 	output.print('</style>')
 def print_footer_svg(output):
@@ -2732,7 +3414,7 @@ def points_lonlat_print_svg(output,rotation,width,height,splitlimit):
 			hc.cleave(onesphere)
 			if onesphere.type!=NULL_TYPE_SHP:
 				flatshape=onesphere.flatten(width,height,splitlimit)
-				flatshape.printsvg(output,cssline='sg')
+				flatshape.printsvg(output,cssline=GRID_SPHERE_CSS)
 	for deg in lons:
 		one=ShapePolyline.makelon(0,0,deg)
 		pluses=ShapePlus.make(one)
@@ -2741,7 +3423,7 @@ def points_lonlat_print_svg(output,rotation,width,height,splitlimit):
 			hc.cleave(onesphere)
 			if onesphere.type!=NULL_TYPE_SHP:
 				flatshape=onesphere.flatten(width,height,splitlimit)
-				flatshape.printsvg(output,cssline='sg')
+				flatshape.printsvg(output,cssline=GRID_SPHERE_CSS)
 
 def arcs_lonlat_print_svg(output,rotation,width,height):
 	lats=[-60.0,-30.0,0.0,30.0,60.0]
@@ -2749,7 +3431,7 @@ def arcs_lonlat_print_svg(output,rotation,width,height):
 	for deg in lats:
 		e=SphereLatitude(rotation.dlat,deg)
 		fe=e.flatten(width,height)
-		fe.printsvg(output,'sg')
+		fe.printsvg(output,GRID_SPHERE_CSS)
 	for deg in lons:
 		e=SphereLongitude.make(rotation,deg)
 		if e==None:
@@ -2757,7 +3439,7 @@ def arcs_lonlat_print_svg(output,rotation,width,height):
 			continue
 #		print('deg:%d rotation.dlon:%f not skipped'%(deg,rotation.dlon),file=sys.stderr)
 		fe=e.flatten(width,height)
-		fe.printsvg(output,'sg')
+		fe.printsvg(output,GRID_SPHERE_CSS)
 
 def tripel_lonlat_print_svg(output,width,height,shift):
 	lats=[-60.0,-30.0,0.0,30.0,60.0]
@@ -2770,7 +3452,7 @@ def tripel_lonlat_print_svg(output,width,height,shift):
 			if onewt.type!=NULL_TYPE_SHP:
 				flatshape=onewt.flatten(width,height)
 				flatshape.shift(shift)
-				flatshape.printsvg(output,cssline='tg')
+				flatshape.printsvg(output,cssline=GRID_TRIPEL_CSS)
 	for deg in lons:
 		one=ShapePolyline.makelon(0,0,deg)
 		pluses=ShapePlus.make(one)
@@ -2779,7 +3461,7 @@ def tripel_lonlat_print_svg(output,width,height,shift):
 			if onewt.type!=NULL_TYPE_SHP:
 				flatshape=onewt.flatten(width,height)
 				flatshape.shift(shift)
-				flatshape.printsvg(output,cssline='tg')
+				flatshape.printsvg(output,cssline=GRID_TRIPEL_CSS)
 
 def print_partlabel_svg(output,xoff,yoff,text,textangle,width,height,partindex,partscount):
 	if False:
@@ -2845,12 +3527,9 @@ class PartCircle():
 		self.isactive=True
 		self.name=name
 
-def findcircle_part_shape(shape,partindex,rotation,width_in,height_in,boxzoomcleave=None):
+def findcircle_part_shape(shape,partindex,rotation,width_in,height_in,boxzoomcleave=None,threshhold=0):
 	width=width_in
 	height=height_in
-	if boxzoomcleave!=None:
-		width=width*boxzoomcleave.zoomfactor
-		height=height*boxzoomcleave.zoomfactor
 	pointcount=0
 	xsum=0
 	ysum=0
@@ -2865,7 +3544,10 @@ def findcircle_part_shape(shape,partindex,rotation,width_in,height_in,boxzoomcle
 		onesphere=SphereShape(oneplus,rotation)
 		hc.cleave(onesphere)
 		if onesphere.type==NULL_TYPE_SHP: continue
-		flatshape=onesphere.flatten(width,height,16)
+		if boxzoomcleave:
+			flatshape=boxzoomcleave.flatten(onesphere)
+		else:
+			flatshape=onesphere.flatten(width,height,16)
 		if flatshape.type==POLYGON_TYPE_SHP:
 			for pg in flatshape.polygons:
 				for p in pg.points:
@@ -2895,13 +3577,15 @@ def findcircle_part_shape(shape,partindex,rotation,width_in,height_in,boxzoomcle
 	r2=x2*x2+y2*y2
 	if r2>r: r=r2
 
-	if boxzoomcleave and boxzoomcleave.zoomshift:
-		ax+=boxzoomcleave.zoomshift.xoff
-		ay+=boxzoomcleave.zoomshift.yoff
+	if boxzoomcleave and boxzoomcleave.shift:
+		ax+=boxzoomcleave.shift.xoff
+		ay+=boxzoomcleave.shift.yoff
 
 	ax=int(0.5+ax)
 	ay=int(0.5+ay)
 	r=int(0.5+math.sqrt(r2))
+
+	if threshhold and r>threshhold: return None
 	return PartCircle(ax,ay,r,partindex)
 
 def trimcircles(circles,sds):
@@ -2924,10 +3608,11 @@ def trimcircles(circles,sds):
 				p.isactive=False
 				break
 
-def print_zoomdots_svg(output,shape,zoomdots,sds,cssclass1,cssclass2,rotation,width,height,boxzoomcleave):
+def print_zoomdots_svg(output,shape,zoomdots,sds,cssclass1,cssclass2,rotation,width,height,boxzoomcleave,threshhold=0):
 	circles=[]
+	if zoomdots==-1: zoomdots=range(shape.partscount)
 	for dot in zoomdots:
-		fc=findcircle_part_shape(shape,dot,rotation,width,height,boxzoomcleave)
+		fc=findcircle_part_shape(shape,dot,rotation,width,height,boxzoomcleave,threshhold)
 		if fc==None: continue
 		circles.append(fc)
 	trimcircles(circles,sds)
@@ -2937,23 +3622,31 @@ def print_zoomdots_svg(output,shape,zoomdots,sds,cssclass1,cssclass2,rotation,wi
 			continue
 		radius=p.r
 		radius+=sds
+		output.countcss(cssclass1)
+		output.countcss(cssclass2)
 		output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass2,p.x,p.y,radius+1))
 		if radius>10:
 			output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass2,p.x,p.y,radius-1))
 		output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass1,p.x,p.y,radius))
 
-def print_centerdot_svg(output,lon,lat,radius,cssclass1,cssclass2,rotation,width,height):
+def print_centerdot_svg(output,lon,lat,radius,cssclass1,cssclass2,rotation,width,height,boxzoomcleave=None):
 	sp=SpherePoint.makefromdll(DegLonLat(lon,lat),rotation)
-	fp=sp.flatten(width,height)
+	if boxzoomcleave:
+		fp=boxzoomcleave.flattenpoint(sp)
+	else:
+		fp=sp.flatten(width,height)
+	output.countcss(cssclass1)
+	output.countcss(cssclass2)
 	output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass2,fp.ux,fp.uy,radius+1))
 	if radius>10:
 		output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass2,fp.ux,fp.uy,radius-1))
 	output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass1,fp.ux,fp.uy,radius))
 
-def print_smalldots_svg(output,shape,smalldots,sds,cssclass1,cssclass2,rotation,width,height):
+def print_smalldots_svg(output,shape,smalldots,sds,cssclass1,cssclass2,rotation,width,height,threshhold=0):
 	circles=[]
+	if smalldots==-1: smalldots=range(shape.partscount)
 	for dot in smalldots:
-		fc=findcircle_part_shape(shape,dot,rotation,width,height)
+		fc=findcircle_part_shape(shape,dot,rotation,width,height,None,threshhold)
 		if fc==None: continue
 		circles.append(fc)
 	trimcircles(circles,sds)
@@ -2963,6 +3656,8 @@ def print_smalldots_svg(output,shape,smalldots,sds,cssclass1,cssclass2,rotation,
 			continue
 		radius=p.r
 		radius+=sds
+		output.countcss(cssclass1)
+		output.countcss(cssclass2)
 		output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass2,p.x,p.y,radius+1))
 		if radius>10:
 			output.print('<circle class="%s" cx="%d" cy="%d" r="%d"/>'%(cssclass2,p.x,p.y,radius-1))
@@ -2979,10 +3674,13 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 	full_partindices=options['full_partindices']
 	zoom_partindices=options['zoom_partindices']
 	splitlimit=options['splitlimit']
+	isusacan=False
+
+	if 'gsg' in options and options['gsg'] in ('US1.USA','CAN.CAN'): isusacan=True
 
 	if True: #cdebug
 		sphere_wc=WorldCompress(sphere_admin0,-1)
-		sphere_wc.addcontinents('sphere')
+		sphere_wc.addcontinents('sphere',isusacan)
 		if options['iszoom']:
 			if options['zoomm']==options['spherem']:
 				zoom_wc=sphere_wc
@@ -3010,54 +3708,10 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 		elif hlc>23.436: hlc=23.436
 		rotation.set_deglonlat(lon,hlc)
 		if isverbose_global: print('Rotation center: (lon,lat)=(%f,%f)'%(lon,hlc),file=sys.stderr)
+		if not options['zoomlon']: options['zoomlon']=lon
+		if not options['zoomlat']: options['zoomlat']=lat
 	rotation2=SphereRotation()
-	rotation2.set_deglonlat(options['lon'],options['lat'])
-
-	css=['sl','sp','sb','sg','fs','ft','tl','tb','tg','sh','sq','si','th','tq']
-	if options['iszoom']:
-		m=['zb','zl','zp','zh','zq','zi']
-		for c in m: css.append(c)
-	if options['issubland']:
-		m=['sl1','sp1']
-		for c in m: css.append(c)
-	if 'zoomdots' in options or 'moredots' in options or 'centerdot' in options:
-		m=['c1','c2','c3','c4','w1','w2','w3','w4']
-		for c in m: css.append(c)
-	if options['islakes'] or options['iscompress']:
-		m=['sw','sr']
-		for c in m: css.append(c)
-	if options['iszoomlakes']:
-		m=['zw','zr']
-		for c in m: css.append(c)
-	if options['islakes']:
-		m=['sw','sr']
-		for c in m: css.append(c)
-	if 'halflightgsgs' in options:
-		m=['al','ap']
-		for c in m: css.append(c)
-	if options['isdisputed']:
-		css.append('dp')
-		if len(options['disputed']):
-			m=['dl']
-			for c in m: css.append(c)
-		if len(options['disputed_border']):
-			m=['db']
-			for c in m: css.append(c)
-		if options['iszoom']:
-			css.append('dx')
-			if len(options['disputed']):
-				m=['dz']
-				for c in m: css.append(c)
-			if len(options['disputed_border']):
-				m=['dy']
-				for c in m: css.append(c)
-	print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']],isgradients=True)
-
-	if 'bgcolor' in options: print_rectangle_svg(output,0,0,width,height,options['bgcolor'],1.0)
-
-	if options['isroundwater']:
-		if width==height: print_roundwater_svg(output,width)
-	if isverbose_global: print('Drawing admin0 sphere shapes',file=sys.stderr)
+	rotation2.set_deglonlat(options['zoomlon'],options['zoomlat'])
 
 	cornercleave=None
 	if options['iszoom']:
@@ -3074,104 +3728,106 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 			zoom_admin0.selectdisputed(options['disputed'],1)
 			zoom_admin0.selectdisputed(options['disputed_border'],2)
 
+	if options['hypso']:
+		hypso=Hypso(options['hypsodim'],options['hypsodim'],'./hypsocache',options['hypsocache'])
+		if options['hypsocache']==None or not hypso.loadpng_cache():
+			if options['hypsocache']==None or not hypso.loadraw_cache():
+				hs=HypsoSphere(install.getfilename(options['hypso']+'.pnm',['10m']))
+				hs.setcenter(rotation.dlon,rotation.dlat)
+				hypso.loadsphere(hs)
+				if options['hypsocache']!=None:
+					hypso.saveraw_cache(True)
+			if cornercleave: hypso.cornercut(cornercleave.corner,cornercleave.xval,cornercleave.yval)
+			p=Palette()
+			p.loaddefaults()
+			if isverbose_global: print('Indexing colors',file=sys.stderr)
+			hypso.indexcolors(p)
+			if options['hypsocache']!=None:
+				hypso.savepng_cache(True)
+		print_hypso_svg(output,width,height,hypso,isfast=False,isgradients=True)
+	else: # not hypso
+		if options['bgcolor']: print_rectangle_svg(output,0,0,width,height,options['bgcolor'],1.0)
+		if options['isroundwater']:
+			if width==height: print_roundwater_svg(output,width)
+
+	if isverbose_global: print('Drawing admin0 sphere shapes',file=sys.stderr)
+
 	if True: #cdebug
 		sphere_wc.removeoverlaps(sphere_admin0.shapes,2) # remove draworder 2 (highlights) from border polylines
-		if options['isdisputed']: # TODO check if we can remove this?
-			sphere_wc.removeoverlaps(sphere_admin0.disputed_shapes,1)
+#		if options['isdisputed']: # TODO check if we can remove this?
+#			sphere_wc.removeoverlaps(sphere_admin0.disputed.shapes,1)
 			
 		if options['iszoom'] and options['spherem']!=options['zoomm']:
 			zoom_wc.removeoverlaps(sphere_admin0.shapes,2) # remove draworder 2 (highlights) from border polylines
-			if options['isdisputed']: # TODO potential remove
-				zoom_wc.removeoverlaps(zoom_admin0.disputed_shapes,1)
+#			if options['isdisputed']: # TODO potential remove
+#				zoom_wc.removeoverlaps(zoom_admin0.disputed.shapes,1)
 
 		pluses=sphere_wc.getpluses(isnegatives=False,isoverlaps=False)
 		negatives=sphere_wc.getnegatives()
 
 		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit,
-				cornercleave=cornercleave, cssfull='sl',csspatch='sp')
+				cornercleave=cornercleave, cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 		for one in sphere_admin0.shapes:
-				one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit, cornercleave=cornercleave, cssfull='sl',csspatch='sp')
+				one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit, cornercleave=cornercleave,
+						cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit,
-				cornercleave=cornercleave, cssfull='sw',csspatch='sr')
+				cornercleave=cornercleave, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS)
 
 	if False:
 		for one in sphere_admin0.shapes:
 #			if one.nickname!='TZA.TZA': continue #cdebug
 #			print('drawing %s %d'%(one.nickname,one.draworder),file=sys.stderr) #cdebug
 			one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,
-					cssfull='sl',csspatch='sp',cssreverse='sw',cssreversepatch='sr',cornercleave=cornercleave)
+					cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,cssreverse=WATER_SPHERE_CSS,cssreversepatch=PATCH_WATER_SPHERE_CSS,cornercleave=cornercleave)
 		for one in sphere_admin0.shapes:
-			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='al',csspatch='ap',
+			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull=AREA_LAND_SPHERE_CSS,csspatch=PATCH_AREA_LAND_SPHERE_CSS,
 					cornercleave=cornercleave) # halflights
 
-	if options['issubland']: # provinces/states on sphere
-		if isverbose_global: print('Loading admin1 data',file=sys.stderr)
-		ifile=install.getinstallfile('admin1.shp',[options['spherem']])
-		admin1=Shp(ifile.filename,ifile)
-		admin1.loadshapes()
-		admin1dbf=Dbf(install.getfilename('admin1.dbf',[ifile.scale]))
-		admin1dbf.selectcfield('sov_a3','sov3')
-		admin1dbf.selectcfield('adm0_a3','adm3')
-		admin1dbf.loadrecords()
-		for one in sphere_admin0.shapes: # underdraw in case admin1 isn't complete cover
-			draworder=1
-			while True:
-				nm=one_sphere_print_svg(output,one,draworder,rotation,width,height,splitlimit)
-				if not nm: break
-				draworder+=1
-		if isverbose_global: print('Drawing admin1 sphere shapes',file=sys.stderr)
-		foundcount=0
-		for i in range(len(admin1dbf.records)):
-			r=admin1dbf.records[i]
-			if r['sov3']==options['grp'] and r['adm3']==options['subgrp']:
-				foundcount+=1
-				one=admin1.shapes[i]
-				one_sphere_print_svg(output,one,-1,rotation,width,height,splitlimit)
-		if isverbose_global:
-			if foundcount==0:
-				print('No admin1 regions found, you should set options.issubland=False',file=sys.stderr)
-				raise ValueError
-			else: print('Admin1 regions found: %d'%foundcount,file=sys.stderr)
-		for partindex in partindices:
-			sphere_admin0.setdraworder(index,partindex,1) # only draws border
-
-	if options['isfullhighlight']:
-		for one in full_admin0.shapes: # highlights
-			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',islabels=options['ispartlabels'])
+	if options['hypso'] and options['hypsocutout']:
+		if options['isfullhighlight']:
+			cutout_sphere_print_svg(output,full_admin0.shapes,2,rotation,width,height,splitlimit,cssfull=HYPSOCUT_SPHERE_CSS,
+					cornercleave=cornercleave)
+		else:
+			cutout_sphere_print_svg(output,sphere_admin0.shapes,2,rotation,width,height,splitlimit,cssfull=HYPSOCUT_SPHERE_CSS,
+					cornercleave=cornercleave)
 	else:
-		for one in sphere_admin0.shapes: # highlights
-			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',islabels=options['ispartlabels'])
-
-	if options['isdisputed']:
-		for one in sphere_admin0.disputed_shapes:
-			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='dl',csspatch='dp')
-		for one in sphere_admin0.disputed_shapes:
-			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='db',csspatch='dp')
+		if options['isfullhighlight']:
+			for one in full_admin0.shapes: # highlights
+				one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,
+						csspatch=PATCH_HIGH_LAND_SPHERE_CSS,islabels=options['ispartlabels'])
+		else:
+			for one in sphere_admin0.shapes: # highlights
+				one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,
+						csspatch=PATCH_HIGH_LAND_SPHERE_CSS,islabels=options['ispartlabels'])
 
 	if options['isfullpartlabels']:
 		for one in full_admin0.shapes: # highlights
-			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',islabels=True)
+			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,
+					csspatch=PATCH_HIGH_LAND_SPHERE_CSS,islabels=True)
 
-	if options['islakes']:
+	if options['islakes'] and not options['hypso']:
 		if isverbose_global: print('Drawing lakes sphere shapes',file=sys.stderr)
 		pluses=sphere_admin0.getlakes()
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr')
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS)
+
+	if options['isdisputed']:
+		for one in sphere_admin0.disputed.shapes:
+			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull=DISPUTED_LAND_SPHERE_CSS,csspatch=PATCH_DISPUTED_LAND_SPHERE_CSS, cssforcepixel=DISPUTED_BORDER_SPHERE_CSS)
+		for one in sphere_admin0.disputed.shapes:
+			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=DISPUTED_BORDER_SPHERE_CSS,csspatch=PATCH_DISPUTED_LAND_SPHERE_CSS, cssforcepixel=DISPUTED_BORDER_SPHERE_CSS)
+
 
 	pluses=sphere_wc.getpluses(ispositives=False,isoverlaps=True)
-	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='sb')
+	pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline=BORDER_SPHERE_CSS)
 
 	borderlakeshapes=None
 	zoom_borderlakeshapes=None
-	if True and 'borderlakes' in options:
+	if options['islakes']:
 		if isverbose_global: print('Drawing border lakes (%s)'%options['spherem'],file=sys.stderr)
 		sasi=ShpAdminShapeIntersection()
 		sasi.addfromshapes(sphere_admin0.shapes,2)
-		if options['isdisputed']: sasi.addfromshapes(sphere_admin0.disputed_shapes,1)
-		for n in options['borderlakes']:
-			l=sphere_admin0.lakes_bynickname[n]
-			if not l:
-				print('Border lake (%s) not found: %s'%(options['spherem'],n),file=sys.stderr)
-				continue
+		if options['isdisputed']: sasi.addfromshapes(sphere_admin0.disputed.shapes,1)
+		for l in sphere_admin0.lakes.shapes:
 			sasi.setinside(l)
 		borderlakeshapes=sasi.exportlines()
 		if options['iszoom']:
@@ -3181,18 +3837,14 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 				if isverbose_global: print('Drawing border lakes (%s)'%options['zoomm'],file=sys.stderr)
 				sasi=ShpAdminShapeIntersection()
 				sasi.addfromshapes(zoom_admin0.shapes,2)
-				if options['isdisputed']: sasi.addfromshapes(zoom_admin0.disputed_shapes,1)
-				for n in options['borderlakes']:
-					l=zoom_admin0.lakes_bynickname[n]
-					if not l:
-						print('Border lake (%s) not found: %s'%(options['zoomm'],n),file=sys.stderr)
-						continue
+				if options['isdisputed']: sasi.addfromshapes(zoom_admin0.disputed.shapes,1)
+				for l in zoom_admin0.lakes.shapes:
 					sasi.setinside(l)
 				zoom_borderlakeshapes=sasi.exportlines()
 
 		for plus in borderlakeshapes:
 			if plus.type!=POLYLINE_TYPE_SHP: continue
-			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si')
+			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=HIGH_BORDER_SPHERE_CSS)
 
 	if 'moredots' in options: # [ (r0,isw0,[partindex00,partindex01]), ... , (rn,iswn,[partindexn0..partindexnm]) ]
 		for moredots in options['moredots']:
@@ -3200,25 +3852,25 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 			sds=int((moredots[0]*width)/1000)
 			isw=moredots[1]
 			smalldots=moredots[2]
-			cssclass='c1'
-			if isinstance(isw,bool) and isw: cssclass='c4'
-			elif isw==1: cssclass='c1'
-			elif isw==2: cssclass='c2'
-			elif isw==3: cssclass='c3'
-			elif isw==4: cssclass='c4'
-			cssclass2='w'+cssclass[1]
+			cssclass=ONE_CIRCLE_CSS
+			if isinstance(isw,bool) and isw: cssclass=FOUR_CIRCLE_CSS
+			elif isw==1: cssclass=ONE_CIRCLE_CSS
+			elif isw==2: cssclass=TWO_CIRCLE_CSS
+			elif isw==3: cssclass=THREE_CIRCLE_CSS
+			elif isw==4: cssclass=FOUR_CIRCLE_CSS
+			cssclass2=getshadow_circle_css(cssclass)
 			print_smalldots_svg(output,shape,smalldots,sds,cssclass,cssclass2,rotation,width,height)
 
 	if 'centerdot' in options: # (r0,isw0)
 		r=int((options['centerdot'][0]*width)/1000)
 		isw=options['centerdot'][1]
-		cssclass='c1'
-		if isinstance(isw,bool) and isw: cssclass='c4'
-		elif isw==1: cssclass='c1'
-		elif isw==2: cssclass='c2'
-		elif isw==3: cssclass='c3'
-		elif isw==4: cssclass='c4'
-		cssclass2='w'+cssclass[1]
+		cssclass=ONE_CIRCLE_CSS
+		if isinstance(isw,bool) and isw: cssclass=FOUR_CIRCLE_CSS
+		elif isw==1: cssclass=ONE_CIRCLE_CSS
+		elif isw==2: cssclass=TWO_CIRCLE_CSS
+		elif isw==3: cssclass=THREE_CIRCLE_CSS
+		elif isw==4: cssclass=FOUR_CIRCLE_CSS
+		cssclass2=getshadow_circle_css(cssclass)
 		print_centerdot_svg(output,options['lon'],options['lat'],r,cssclass,cssclass2,rotation,width,height)
 
 	if True:
@@ -3261,17 +3913,17 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 			onewt=TripelShape(oneplus)
 			flatshape=onewt.flatten(insetwidth,insetheight)
 			flatshape.shift(insetshift)
-			flatshape.printsvg(output,cssfull='tb')
+			flatshape.printsvg(output,cssfull=BACK_TRIPEL_CSS)
 #		print_rectangle_svg(output,int(insetshift.xoff),int(insetshift.yoff+insetheight*0.025),insetwidth,int(insetheight*0.7),'#000000',0.3)
 
 		if True:
-			land=Shp(install.getfilename('land.shp',['110m']))
+			land=Shp(installfile=install.getinstallfile('land.shp',['110m']))
 			land.loadshapes()
 			for one in land.shapes:
-				one_inset_tripel_print_svg(output,land,one,0,insetwidth,insetheight,None,'tl',None,insetshift)
+				one_inset_tripel_print_svg(output,land,one,0,insetwidth,insetheight,None,LAND_TRIPEL_CSS,None,insetshift)
 
 		for one in full_admin0.shapes: # highlights
-			one_inset_tripel_print_svg(output,full_admin0,one,2,insetwidth,insetheight,None,'th','tq',insetshift)
+			one_inset_tripel_print_svg(output,full_admin0,one,2,insetwidth,insetheight,None,HIGH_LAND_TRIPEL_CSS,PATCH_HIGH_LAND_TRIPEL_CSS,insetshift)
 
 		tripel_lonlat_print_svg(output,insetwidth,insetheight,insetshift)
 
@@ -3291,10 +3943,8 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 		zwidth=int(coeff*width)
 		zheight=int(coeff*height)
 		xoff=width-zwidth
-		xoff2=width-int(zwidth/2)
 		if options['istopinsets']:
 			yoff=0
-			yoff2=int(zheight/2)
 			xmargin=0
 			ymargin=0
 			print_rectangle_svg(output,xoff-cutmargin-3,0,zwidth+cutmargin+3,zheight+cutmargin+3,'#ffffff',1.0)
@@ -3302,7 +3952,6 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 			print_rectangle_svg(output,xoff-margin,margin,zwidth,zheight,'#70add3',1.0)
 		else:
 			yoff=height-zheight
-			yoff2=height-int(zheight/2)
 			xmargin=0
 			ymargin=0
 			print_rectangle_svg(output,xoff-cutmargin-3,yoff-cutmargin-3,zwidth+cutmargin+3,zheight+cutmargin+3,'#ffffff',1.0)
@@ -3310,10 +3959,9 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 			print_rectangle_svg(output,xoff-margin,yoff-margin,zwidth,zheight,'#70add3',1.0)
 
 		scale=options['zoomscale']
-		boff=-int(scale*width/2)
 		boxd=coeff/scale
-		zoomshift=Shift(xoff2+boff-xmargin,yoff2+boff-ymargin)
-		bzc=BoxZoomCleave(scale,-boxd,boxd,-boxd,boxd,zoomshift)
+		zoomshift=Shift(xoff-xmargin,yoff-ymargin)
+		bzc=BoxZoomCleave(boxd,boxd,zwidth,zheight,splitlimit,zoomshift)
 		if zoom_index!=-1:
 			for partindex in zoom_partindices:
 				zoom_admin0.setdraworder(zoom_index,partindex,2)
@@ -3322,12 +3970,12 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 		negatives=zoom_wc.getnegatives()
 
 		pluses_sphere_print_svg(output,pluses,rotation2,width,height,splitlimit,
-				boxzoomcleave=bzc, cssfull='zl',csspatch='zp')
+				boxzoomcleave=bzc, cssfull=LAND_ZOOM_CSS,csspatch=PATCH_LAND_ZOOM_CSS)
 		for one in zoom_admin0.shapes:
 				one_sphere_print_svg(output,one,0,rotation2,width,height,splitlimit,
-						boxzoomcleave=bzc, cssfull='zl',csspatch='zp')
+						boxzoomcleave=bzc, cssfull=LAND_ZOOM_CSS,csspatch=PATCH_LAND_ZOOM_CSS)
 		pluses_sphere_print_svg(output,negatives,rotation2,width,height,splitlimit,
-				boxzoomcleave=bzc, cssfull='sw',csspatch='sr')
+				boxzoomcleave=bzc, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS)
 
 		if options['issubland']:
 			if 'grp' in options:
@@ -3345,26 +3993,30 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 				for partindex in full_partindices:
 					full_admin0.setdraworder(full_index,partindex,1)
 		for one in full_admin0.shapes: # highlights
-			one_sphere_print_svg(output,one,2,rotation2,width,height,splitlimit,cssfull='zh',csspatch='zq',
+			one_sphere_print_svg(output,one,2,rotation2,width,height,splitlimit,cssfull=HIGH_LAND_ZOOM_CSS,csspatch=PATCH_HIGH_LAND_ZOOM_CSS,
 					boxzoomcleave=bzc)
-		if options['isdisputed']:
-			for one in zoom_admin0.disputed_shapes:
-				one_sphere_print_svg(output,one,1,rotation2,width,height,splitlimit,cssfull='dz',csspatch='dx',boxzoomcleave=bzc)
-			for one in zoom_admin0.disputed_shapes:
-				one_sphere_print_svg(output,one,2,rotation2,width,height,splitlimit,cssfull='dy',csspatch='dx',boxzoomcleave=bzc)
 
 		if options['iszoomlakes']:
 			if isverbose_global: print('Drawing zoom lakes',file=sys.stderr)
 			pluses=zoom_admin0.getlakes()
-			pluses_sphere_print_svg(output,pluses,rotation2,width,height,splitlimit, cssfull='zw',csspatch='zp',boxzoomcleave=bzc)
+			pluses_sphere_print_svg(output,pluses,rotation2,width,height,splitlimit, cssfull=WATER_ZOOM_CSS,csspatch=PATCH_WATER_ZOOM_CSS,boxzoomcleave=bzc)
 
 		pluses=zoom_wc.getpluses(ispositives=False,isoverlaps=True)
-		pluses_sphere_print_svg(output,pluses,rotation2,width,height,splitlimit, cssline='zb',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,pluses,rotation2,width,height,splitlimit, cssline=BORDER_ZOOM_CSS,boxzoomcleave=bzc)
 
 		if zoom_borderlakeshapes:
 			for plus in zoom_borderlakeshapes:
 				if plus.type!=POLYLINE_TYPE_SHP: continue
-				oneplus_sphere_print_svg(output,plus,rotation2,width,height,splitlimit,cssline='zi',boxzoomcleave=bzc)
+				oneplus_sphere_print_svg(output,plus,rotation2,width,height,splitlimit,cssline=HIGH_LAKELINE_ZOOM_CSS,boxzoomcleave=bzc)
+
+		if options['isdisputed']:
+			for one in zoom_admin0.disputed.shapes:
+				one_sphere_print_svg(output,one,1,rotation2,width,height,splitlimit,cssfull=DISPUTED_LAND_ZOOM_CSS,csspatch=PATCH_DISPUTED_LAND_ZOOM_CSS,
+						cssforcepixel=options['zoomdisputedcssforce'], boxzoomcleave=bzc)
+			for one in zoom_admin0.disputed.shapes:
+				one_sphere_print_svg(output,one,2,rotation2,width,height,splitlimit,cssfull=DISPUTED_BORDER_ZOOM_CSS,csspatch=PATCH_DISPUTED_LAND_ZOOM_CSS,
+						cssforcepixel=options['zoomdisputedbordercssforce'], boxzoomcleave=bzc)
+
 
 		if 'zoomdots' in options: # [ (r0,isw0,[partindex00,partindex01]), ... , (rn,iswn,[partindexn0..partindexnm]) ]
 			for zoomdots in options['zoomdots']:
@@ -3372,17 +4024,22 @@ def combo_print_svg(output,options,full_admin0,sphere_admin0,zoom_admin0):
 				sds=int((zoomdots[0]*width)/1000)
 				isw=zoomdots[1]
 				dots=zoomdots[2]
-				cssclass='c1'
-				if isinstance(isw,bool) and isw: cssclass='c4'
-				elif isw==1: cssclass='c1'
-				elif isw==2: cssclass='c2'
-				elif isw==3: cssclass='c3'
-				elif isw==4: cssclass='c4'
-				cssclass2='w'+cssclass[1]
+				cssclass=ONE_CIRCLE_CSS
+				if isinstance(isw,bool) and isw: cssclass=FOUR_CIRCLE_CSS
+				elif isw==1: cssclass=ONE_CIRCLE_CSS
+				elif isw==2: cssclass=TWO_CIRCLE_CSS
+				elif isw==3: cssclass=THREE_CIRCLE_CSS
+				elif isw==4: cssclass=FOUR_CIRCLE_CSS
+				cssclass2=getshadow_circle_css(cssclass)
 				print_zoomdots_svg(output,shape,dots,sds,cssclass,cssclass2,rotation2,width,height,bzc)
 
 	print_footer_svg(output)
-
+	if True:
+		o=Output()
+		ishypso=True if options['hypso'] else False
+		print_header_svg(o,width,height,output.csscounts,options['labelfont'],[options['copyright'],options['comment']],isgradients=True,
+				ishypso=ishypso)
+		output.prepend(o)
 
 class FieldDbf():
 	def __init__(self,buff32,offset):
@@ -3394,9 +4051,14 @@ class FieldDbf():
 		self.offset=offset
 
 class Dbf():
-	def __init__(self,filename):
-		self.filename=filename
-		self.f=open(self.filename,"rb")
+	def __init__(self,filename=None,installfile=None):
+		self.installfile=installfile
+		if installfile:
+			self.filename=installfile.filename
+			self.f=installfile.open()
+		else:
+			self.filename=filename
+			self.f=open(filename,"rb")
 		self._loadheader()
 	def close(self):
 		self.f.close()
@@ -3428,7 +4090,7 @@ class Dbf():
 			onerecord['_index']=idx
 			for sf in self.selectedcfields:
 				f=self.selectedcfields[sf]
-				onerecord[sf]=recorddata[f.offset:f.offset+f.length].decode().rstrip()
+				onerecord[sf]=recorddata[f.offset:f.offset+f.length].decode().rstrip(' \t\x00\ufeff').lstrip(' \t\ufeff')
 			self.records.append(onerecord)
 	def _loadheader(self):
 		buff32=self.f.read(32)
@@ -3492,71 +4154,100 @@ class InstallFile():
 				fn=d+n
 				self.log.append('Checked for %s (not found)'%fn)
 		return False
+	def open(self):
+#		print('Install.open(%s)'%self.filename,file=sys.stderr)
+		if not self.isfound: raise ValueError
+		if not self.filename.endswith('zip'): return open(self.filename,'rb')
+		if not zipfile:
+			print('%s was found only as a zip file, but zipfile module isn\'t loaded'%self.filename,file=sys.stderr)
+			raise ValueError
+		zf=zipfile.ZipFile(self.filename)
+		namelist=zf.namelist()
+		for fn in self.filenames:
+			if fn not in namelist: continue
+			return zf.open(fn)
+		print('Couldn\'t find',self.filenames,'in',namelist,file=sys.stderr)
+		raise ValueError
 
 class Install():
 	def __init__(self):
 		self.filenames_10m={}
 		self.filenames_50m={}
 		self.filenames_110m={}
-		self.addfile('admin0-lakes.shp','10m','admin', ['ne_10m_admin_0_countries_lakes.shp'])
-		self.addfile('admin0-lakes.shp','50m','admin', ['ne_50m_admin_0_countries_lakes.shp'])
-		self.addfile('admin0-lakes.shp','110m','admin', ['ne_110m_admin_0_countries_lakes.shp'])
+		self.addfile('admin0-lakes.shp','10m','admin', ['ne_10m_admin_0_countries_lakes.shp','ne_10m_admin_0_countries_lakes.zip'])
+		self.addfile('admin0-lakes.shp','50m','admin', ['ne_50m_admin_0_countries_lakes.shp','ne_50m_admin_0_countries_lakes.zip'])
+		self.addfile('admin0-lakes.shp','110m','admin', ['ne_110m_admin_0_countries_lakes.shp','ne_110m_admin_0_countries_lakes.zip'])
 
-		self.addfile('admin0-nolakes.shp','10m','admin', ['ne_10m_admin_0_countries.shp'])
-		self.addfile('admin0-nolakes.shp','50m','admin', ['ne_50m_admin_0_countries.shp'])
-		self.addfile('admin0-nolakes.shp','110m','admin', ['ne_110m_admin_0_countries.shp'])
+		self.addfile('admin0-nolakes.shp','10m','admin', ['ne_10m_admin_0_countries.shp', 'ne_10m_admin_0_countries.zip'])
+		self.addfile('admin0-nolakes.shp','50m','admin', ['ne_50m_admin_0_countries.shp', 'ne_50m_admin_0_countries.zip'])
+		self.addfile('admin0-nolakes.shp','110m','admin', ['ne_110m_admin_0_countries.shp', 'ne_110m_admin_0_countries.zip'])
 
-		self.addfile('admin0-lakes.dbf','10m','admin', ['ne_10m_admin_0_countries_lakes.dbf'])
-		self.addfile('admin0-lakes.dbf','50m','admin', ['ne_50m_admin_0_countries_lakes.dbf'])
-		self.addfile('admin0-lakes.dbf','110m','admin', ['ne_110m_admin_0_countries_lakes.dbf'])
+		self.addfile('admin0-lakes.dbf','10m','admin', ['ne_10m_admin_0_countries_lakes.dbf','ne_10m_admin_0_countries_lakes.zip'])
+		self.addfile('admin0-lakes.dbf','50m','admin', ['ne_50m_admin_0_countries_lakes.dbf','ne_50m_admin_0_countries_lakes.zip'])
+		self.addfile('admin0-lakes.dbf','110m','admin', ['ne_110m_admin_0_countries_lakes.dbf','ne_110m_admin_0_countries_lakes.zip'])
 
-		self.addfile('admin0-nolakes.dbf','10m','admin', ['ne_10m_admin_0_countries.dbf'])
-		self.addfile('admin0-nolakes.dbf','50m','admin', ['ne_50m_admin_0_countries.dbf'])
-		self.addfile('admin0-nolakes.dbf','110m','admin', ['ne_110m_admin_0_countries.dbf'])
+		self.addfile('admin0-nolakes.dbf','10m','admin', ['ne_10m_admin_0_countries.dbf','ne_10m_admin_0_countries.zip'])
+		self.addfile('admin0-nolakes.dbf','50m','admin', ['ne_50m_admin_0_countries.dbf','ne_50m_admin_0_countries.zip'])
+		self.addfile('admin0-nolakes.dbf','110m','admin', ['ne_110m_admin_0_countries.dbf','ne_110m_admin_0_countries.zip'])
 
-		self.addfile('admin1-lakes.shp','10m','admin', ['ne_10m_admin_1_states_provinces_lakes.shp'])
-		self.addfile('admin1-lakes.shp','50m','admin', ['ne_50m_admin_1_states_provinces_lakes.shp'])
-		self.addfile('admin1-lakes.shp','110m','admin', ['ne_110m_admin_1_states_provinces_lakes.shp'])
+		self.addfile('admin1-lakes.shp','10m','admin', ['ne_10m_admin_1_states_provinces_lakes.shp','ne_10m_admin_1_states_provinces_lakes.zip'])
+		self.addfile('admin1-lakes.shp','50m','admin', ['ne_50m_admin_1_states_provinces_lakes.shp','ne_50m_admin_1_states_provinces_lakes.zip'])
+		self.addfile('admin1-lakes.shp','110m','admin', ['ne_110m_admin_1_states_provinces_lakes.shp','ne_110m_admin_1_states_provinces_lakes.zip'])
 
-		self.addfile('admin1-nolakes.shp','10m','admin', ['ne_10m_admin_1_states_provinces.shp'])
-		self.addfile('admin1-nolakes.shp','50m','admin', ['ne_50m_admin_1_states_provinces.shp'])
-		self.addfile('admin1-nolakes.shp','110m','admin', ['ne_110m_admin_1_states_provinces.shp'])
+		self.addfile('admin1-nolakes.shp','10m','admin', ['ne_10m_admin_1_states_provinces.shp','ne_10m_admin_1_states_provinces.zip'])
+		self.addfile('admin1-nolakes.shp','50m','admin', ['ne_50m_admin_1_states_provinces.shp','ne_50m_admin_1_states_provinces.zip'])
+		self.addfile('admin1-nolakes.shp','110m','admin', ['ne_110m_admin_1_states_provinces.shp','ne_110m_admin_1_states_provinces.zip'])
 
-		self.addfile('admin1-lakes.dbf','10m','admin', ['ne_10m_admin_1_states_provinces_lakes.dbf'])
-		self.addfile('admin1-lakes.dbf','50m','admin', ['ne_50m_admin_1_states_provinces_lakes.dbf'])
-		self.addfile('admin1-lakes.dbf','110m','admin', ['ne_110m_admin_1_states_provinces_lakes.dbf'])
+		self.addfile('admin1-lakes.dbf','10m','admin', ['ne_10m_admin_1_states_provinces_lakes.dbf','ne_10m_admin_1_states_provinces_lakes.zip'])
+		self.addfile('admin1-lakes.dbf','50m','admin', ['ne_50m_admin_1_states_provinces_lakes.dbf','ne_50m_admin_1_states_provinces_lakes.zip'])
+		self.addfile('admin1-lakes.dbf','110m','admin', ['ne_110m_admin_1_states_provinces_lakes.dbf','ne_110m_admin_1_states_provinces_lakes.zip'])
 
-		self.addfile('admin1-nolakes.dbf','10m','admin', ['ne_10m_admin_1_states_provinces.dbf'])
-		self.addfile('admin1-nolakes.dbf','50m','admin', ['ne_50m_admin_1_states_provinces.dbf'])
-		self.addfile('admin1-nolakes.dbf','110m','admin', ['ne_110m_admin_1_states_provinces.dbf'])
+		self.addfile('admin1-nolakes.dbf','10m','admin', ['ne_10m_admin_1_states_provinces.dbf','ne_10m_admin_1_states_provinces.zip'])
+		self.addfile('admin1-nolakes.dbf','50m','admin', ['ne_50m_admin_1_states_provinces.dbf','ne_50m_admin_1_states_provinces.zip'])
+		self.addfile('admin1-nolakes.dbf','110m','admin', ['ne_110m_admin_1_states_provinces.dbf','ne_110m_admin_1_states_provinces.zip'])
 
-		self.addfile('lakes.shp','10m','lakes', [ 'ne_10m_lakes.shp' ])
-		self.addfile('lakes.shp','50m','lakes', [ 'ne_50m_lakes.shp' ])
-		self.addfile('lakes.shp','110m','lakes', [ 'ne_110m_lakes.shp' ])
+		self.addfile('admin1-lines.shp','10m','admin', ['ne_10m_admin_1_states_provinces_lines.shp','ne_10m_admin_1_states_provinces_lines.zip'])
+		self.addfile('admin1-lines.shp','50m','admin', ['ne_50m_admin_1_states_provinces_lines.shp','ne_50m_admin_1_states_provinces_lines.zip'])
+		self.addfile('admin1-lines.shp','110m','admin', ['ne_110m_admin_1_states_provinces_lines.shp','ne_110m_admin_1_states_provinces_lines.zip'])
 
-		self.addfile('lakes.dbf','10m','lakes', [ 'ne_10m_lakes.dbf' ])
-		self.addfile('lakes.dbf','50m','lakes', [ 'ne_50m_lakes.dbf' ])
-		self.addfile('lakes.dbf','110m','lakes', [ 'ne_110m_lakes.dbf' ])
+		self.addfile('admin1-lines.dbf','10m','admin', ['ne_10m_admin_1_states_provinces_lines.dbf','ne_10m_admin_1_states_provinces_lines.zip'])
+		self.addfile('admin1-lines.dbf','50m','admin', ['ne_50m_admin_1_states_provinces_lines.dbf','ne_50m_admin_1_states_provinces_lines.zip'])
+		self.addfile('admin1-lines.dbf','110m','admin', ['ne_110m_admin_1_states_provinces_lines.dbf','ne_110m_admin_1_states_provinces_lines.zip'])
 
-		self.addfile('ocean.shp','10m','ocean', [ 'ne_10m_ocean.shp' ])
-		self.addfile('ocean.shp','50m','ocean', [ 'ne_50m_ocean.shp' ])
-		self.addfile('ocean.shp','110m','ocean', [ 'ne_110m_ocean.shp' ])
+		self.addfile('lakes.shp','10m','lakes', [ 'ne_10m_lakes.shp','ne_10m_lakes.zip' ])
+		self.addfile('lakes.shp','50m','lakes', [ 'ne_50m_lakes.shp','ne_50m_lakes.zip' ])
+		self.addfile('lakes.shp','110m','lakes', [ 'ne_110m_lakes.shp','ne_110m_lakes.zip' ])
 
-		self.addfile('coast.shp','10m','coast', [ 'ne_10m_coastline.shp' ])
-		self.addfile('coast.shp','50m','coast', [ 'ne_50m_coastline.shp' ])
-		self.addfile('coast.shp','110m','coast', [ 'ne_110m_coastline.shp' ])
+		self.addfile('lakes.dbf','10m','lakes', [ 'ne_10m_lakes.dbf','ne_10m_lakes.zip' ])
+		self.addfile('lakes.dbf','50m','lakes', [ 'ne_50m_lakes.dbf','ne_50m_lakes.zip' ])
+		self.addfile('lakes.dbf','110m','lakes', [ 'ne_110m_lakes.dbf','ne_110m_lakes.zip' ])
 
-		self.addfile('land.shp','10m','land', [ 'ne_10m_land.shp' ])
-		self.addfile('land.shp','50m','land', [ 'ne_50m_land.shp' ])
-		self.addfile('land.shp','110m','land', [ 'ne_110m_land.shp' ])
+		self.addfile('ocean.shp','10m','ocean', [ 'ne_10m_ocean.shp','ne_10m_ocean.zip' ])
+		self.addfile('ocean.shp','50m','ocean', [ 'ne_50m_ocean.shp' ,'ne_50m_ocean.zip'])
+		self.addfile('ocean.shp','110m','ocean', [ 'ne_110m_ocean.shp' ,'ne_110m_ocean.zip'])
 
-		self.addfile('admin0-disputed.shp','10m','admin', [ 'ne_10m_admin_0_breakaway_disputed_areas.shp' ])
-		self.addfile('admin0-disputed.shp','50m','admin', [ 'ne_50m_admin_0_breakaway_disputed_areas.shp' ])
-		self.addfile('admin0-disputed.shp','110m','admin', [ 'ne_110m_admin_0_breakaway_disputed_areas.shp' ])
+		self.addfile('coast.shp','10m','coast', [ 'ne_10m_coastline.shp','ne_10m_coastline.zip' ])
+		self.addfile('coast.shp','50m','coast', [ 'ne_50m_coastline.shp' ,'ne_50m_coastline.zip'])
+		self.addfile('coast.shp','110m','coast', [ 'ne_110m_coastline.shp' ,'ne_110m_coastline.zip'])
 
-		self.addfile('admin0-disputed.dbf','10m','admin', [ 'ne_10m_admin_0_breakaway_disputed_areas.dbf' ])
-		self.addfile('admin0-disputed.dbf','50m','admin', [ 'ne_50m_admin_0_breakaway_disputed_areas.dbf' ])
-		self.addfile('admin0-disputed.dbf','110m','admin', [ 'ne_110m_admin_0_breakaway_disputed_areas.dbf' ])
+		self.addfile('land.shp','10m','land', [ 'ne_10m_land.shp','ne_10m_land.zip' ])
+		self.addfile('land.shp','50m','land', [ 'ne_50m_land.shp' ,'ne_50m_land.zip'])
+		self.addfile('land.shp','110m','land', [ 'ne_110m_land.shp' ,'ne_110m_land.zip'])
+
+		self.addfile('admin0-disputed.shp','10m','admin', [ 'ne_10m_admin_0_disputed_areas.shp','ne_10m_admin_0_disputed_areas.zip' ])
+		self.addfile('admin0-disputed.shp','50m','admin', [ 'ne_50m_admin_0_breakaway_disputed_areas.shp','ne_50m_admin_0_breakaway_disputed_areas.zip' ])
+		self.addfile('admin0-disputed.shp','110m','admin', [ 'ne_110m_admin_0_breakaway_disputed_areas.shp','ne_110m_admin_0_breakaway_disputed_areas.zip' ])
+
+		self.addfile('admin0-disputed.dbf','10m','admin', [ 'ne_10m_admin_0_disputed_areas.dbf','ne_10m_admin_0_disputed_areas.zip' ])
+		self.addfile('admin0-disputed.dbf','50m','admin', [ 'ne_50m_admin_0_breakaway_disputed_areas.dbf','ne_50m_admin_0_breakaway_disputed_areas.zip' ])
+		self.addfile('admin0-disputed.dbf','110m','admin', [ 'ne_110m_admin_0_breakaway_disputed_areas.dbf','ne_110m_admin_0_breakaway_disputed_areas.zip' ])
+
+		self.addfile('hypso-sr_w.pnm','50m','hypso', [ 'hyp_50m_sr_w.pnm','hyp_50m_sr_w.zip' ])
+		self.addfile('hypso-lr_sr_ob_dr.pnm','10m','hypso', [ 'hyp_lr_sr_ob_dr.pnm','hyp_lr_sr_ob_dr.zip',
+				'hyp_hr_sr_ob_dr.pnm','hyp_hr_sr_ob_dr.zip' ]) # hr can fill in for lr
+		self.addfile('hypso-hr_sr_ob_dr.pnm','10m','hypso', [ 'hyp_hr_sr_ob_dr.pnm','hyp_hr_sr_ob_dr.zip' ])
+
+
 	def addfile(self,nickname,scale,dclass,filenames):
 		f=InstallFile(nickname,scale,dclass,filenames)
 		f.findfile()
@@ -3565,31 +4256,33 @@ class Install():
 		elif scale=='110m': self.filenames_110m[nickname]=f
 		else: raise ValueError
 
-	def getinstallfile(self,nicknames,scales=None):
+	def getinstallfile(self,nicknames,scales=None,failok=False):
 		if not isinstance(nicknames,list):
-			if nicknames=='admin0.shp': return self.getinstallfile(['admin0-lakes.shp','admin0-nolakes.shp'],scales)
-			if nicknames=='admin1.shp': return self.getinstallfile(['admin1-lakes.shp','admin1-nolakes.shp'],scales)
-			if nicknames=='admin0.dbf': return self.getinstallfile(['admin0-lakes.dbf','admin0-nolakes.dbf'],scales)
-			if nicknames=='admin1.dbf': return self.getinstallfile(['admin1-lakes.dbf','admin1-nolakes.dbf'],scales)
-			return self.getinstallfile([nicknames],scales)
+			if nicknames=='admin0.shp': return self.getinstallfile(['admin0-lakes.shp','admin0-nolakes.shp'],scales,failok)
+			if nicknames=='admin1.shp': return self.getinstallfile(['admin1-lakes.shp','admin1-nolakes.shp'],scales,failok)
+			if nicknames=='admin0.dbf': return self.getinstallfile(['admin0-lakes.dbf','admin0-nolakes.dbf'],scales,failok)
+			if nicknames=='admin1.dbf': return self.getinstallfile(['admin1-lakes.dbf','admin1-nolakes.dbf'],scales,failok)
+			return self.getinstallfile([nicknames],scales,failok)
 		if scales==None: scales=['10m','50m','110m']
 		for nickname in nicknames:
 			for scale in scales:
-				if scale=='10m': f=self.filenames_10m[nickname]
-				elif scale=='50m': f=self.filenames_50m[nickname]
-				elif scale=='110m': f=self.filenames_110m[nickname]
+				if scale=='10m': f=self.filenames_10m.get(nickname,None)
+				elif scale=='50m': f=self.filenames_50m.get(nickname,None)
+				elif scale=='110m': f=self.filenames_110m.get(nickname,None)
 				else: raise ValueError("Unsupported scale: "+str(scale))
-				if f.isfound: return f
+				if f and f.isfound: return f
+		if not failok: raise ValueError("Couldn't find base file for %s (%s)"%(nicknames,str(scales)))
 		return None
 	def getfilename(self,nickname,scales=None):
 		f=self.getinstallfile(nickname,scales)
+		if not f: raise ValueError("Couldn't find base file for %s (%s)"%(nickname,str(scales)))
 		return f.filename
 	def print(self,n=None,scales=None):
 		if n:
 			if scales==None: scales=['10m','50m','110m']
 			isfound=False
 			for scale in scales:
-				f=self.getinstallfile(n,[scale])
+				f=self.getinstallfile(n,[scale],failok=True)
 				if f and f.isfound:
 					isfound=True
 					print('Found file %s (%s) -> %s'%(n,f.scale,f.filename),file=sys.stdout)
@@ -3598,23 +4291,26 @@ class Install():
 		self.print('admin0-lakes.shp')
 		self.print('admin0-nolakes.shp')
 		self.print('admin0.dbf')
+		self.print('admin0-disputed.shp')
+		self.print('admin0-disputed.dbf')
 		self.print('admin1-lakes.shp')
 		self.print('admin1-nolakes.shp')
 		self.print('admin1.dbf')
+		self.print('admin1-lines.shp')
+		self.print('admin1-lines.dbf')
 		self.print('lakes.shp')
 		self.print('lakes.dbf')
 		self.print('coast.shp')
 		self.print('ocean.shp')
 		self.print('land.shp')
-		self.print('admin0-disputed.shp')
-		self.print('admin0-disputed.dbf')
+		self.print('hypso-sr_w.pnm')
+		self.print('hypso-lr_sr_ob_dr.pnm')
+		self.print('hypso-hr_sr_ob_dr.pnm')
 	def printlog(self):
 		for d in [self.filenames_10m,self.filenames_50m,self.filenames_110m]:
 			for n in d:
 				f=d[n]
 				for l in f.log: print(l,file=sys.stdout)
-		
-		
 
 
 # isverbose_global=True
@@ -3622,18 +4318,33 @@ install=Install()
 
 def admin0dbf_test(): # admin0 test
 	scale='10m'
-	admin0dbf=Dbf(install.getfilename('admin0-nolakes.dbf',[scale]))
+	admin0dbf=Dbf(installfile=install.getinstallfile('admin0-nolakes.dbf',[scale]))
 	admin0dbf.selectcfield('SOV_A3','sov3')
 	admin0dbf.selectcfield('ADM0_A3','adm3')
+	admin0dbf.selectcfield('NAME','name')
 	admin0dbf.print()
 	admin0dbf.loadrecords()
 	for i in range(len(admin0dbf.records)):
 		print(i,': ',admin0dbf.records[i])
 
+def russiafix_test(): # test merging russia's -180deg tail to her 180deg main
+	scale='50m'
+	scale='10m'
+
+	admin=ShpAdmin('admin0-nolakes.shp',[scale])
+	rus=admin.bynickname['RUS.RUS']
+	print('Before fix')
+	rus.print()
+	if True:
+		print('During fix')
+		admin.fixrussia(isdebug=True)
+		print('After fix')
+		rus.print()
+
 def lakesdbf_test(): # lakes test
 	scale='50m'
 	bynickname={}
-	lakesdbf=Dbf(install.getfilename('lakes.dbf',[scale]))
+	lakesdbf=Dbf(installfile=install.getinstallfile('lakes.dbf',[scale]))
 	lakesdbf.selectcfield('name','name')
 	lakesdbf.loadrecords()
 	if True:
@@ -3641,7 +4352,7 @@ def lakesdbf_test(): # lakes test
 		for i in range(len(lakesdbf.records)):
 			print(i,': ',lakesdbf.records[i])
 
-	lakesshp=Shp(install.getfilename('lakes.shp',[scale]))
+	lakesshp=Shp(installfile=install.getinstallfile('lakes.shp',[scale]))
 	lakesshp.loadshapes()
 
 	for i in range(len(lakesdbf.records)):
@@ -3649,12 +4360,12 @@ def lakesdbf_test(): # lakes test
 		bynickname[nickname]=lakesshp.shapes[i]
 
 	l=bynickname['Lake Michigan']
-	mbr=l.getmbr([-1])
+	mbr=l.getmbr(-1)
 	print('Lake Michigan: %s'%str(mbr))
 
 	for i in range(len(lakesdbf.records)):
 		l=lakesshp.shapes[i]
-		mbr=l.getmbr([-1])
+		mbr=l.getmbr(-1)
 		if mbr.minx < -85: continue
 		if mbr.minx > -80: continue
 		if mbr.miny < 40: continue
@@ -3681,7 +4392,7 @@ def lakesintersection_test(): # lakes intersecting shape -> border
 			sasi.addpolygon(pg)
 
 	for n in ['Lake Superior','Lake Ontario','Lake Erie','Lake Huron','Lake of the Woods','Upper Red Lake']:
-		l=admin0.lakes_bynickname[n]
+		l=admin0.lakes.bynickname[n]
 		sasi.setinside(l)
 
 	exportpluses=sasi.exportlines()
@@ -3691,14 +4402,14 @@ def lakesintersection_test(): # lakes intersecting shape -> border
 	height=1000
 	rotation=SphereRotation()
 	rotation.set_deglonlat(-84,23)
-	print_header_svg(output,width,height,['sl','sp','sb','sw','sr','debugl','c4'],isgradients=True)
+	print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,BORDER_SPHERE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,'debugl',FOUR_CIRCLE_CSS],isgradients=True)
 	print_roundwater_svg(output,width)
 
-	one_sphere_print_svg(output,admin0.bynickname['US1.USA'],-1,rotation,width,height,8,cssfull='sl',csspatch='sp')
-	one_sphere_print_svg(output,admin0.bynickname['CAN.CAN'],-1,rotation,width,height,8,cssfull='sl',csspatch='sp')
+	one_sphere_print_svg(output,admin0.bynickname['US1.USA'],-1,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
+	one_sphere_print_svg(output,admin0.bynickname['CAN.CAN'],-1,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 
 	lakepluses=admin0.getlakes()
-	pluses_sphere_print_svg(output,lakepluses,rotation,width,height,8, cssfull='sw',csspatch='sr')
+	pluses_sphere_print_svg(output,lakepluses,rotation,width,height,8, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS)
 
 	for plus in exportpluses:
 		if plus.type!=POLYLINE_TYPE_SHP: continue
@@ -3706,38 +4417,55 @@ def lakesintersection_test(): # lakes intersecting shape -> border
 
 	if False:
 		dll=DegLonLat(-95,49)
-		dll_sphere_print_svg(output,dll,rotation,width,height,'c4')
+		dll_sphere_print_svg(output,dll,rotation,width,height,FOUR_CIRCLE_CSS)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def disputeddbf_test(): # disputed admin0 test
-	dbf=Dbf(install.getfilename('admin0-disputed.dbf'))
+	scale='50m'
+	scale='10m'
+	dbf=Dbf(installfile=install.getinstallfile('admin0-disputed.dbf',[scale]))
 	dbf.selectcfield('BRK_NAME','name')
 	dbf.selectcfield('SOV_A3','sov3')
 	dbf.selectcfield('ADM0_A3','adm3')
 	dbf.loadrecords()
 	for i in range(len(dbf.records)):
 		r=dbf.records[i]
-		print("%d: \"%s\" %s.%s"%(i,r['name'],r['sov3'],r['adm3']))
+		print("%d:\t\"%s.%s.%s\""%(i, r['sov3'], r['adm3'], r['name']))
 
 def admin1dbf_test(): # admin1 test
-	admin1dbf=Dbf(install.getfilename('admin1.dbf'))
+	admin1dbf=Dbf(installfile=install.getinstallfile('admin1-nolakes.dbf'))
+	admin1dbf.print()
 	admin1dbf.selectcfield('sov_a3','sov3')
 	admin1dbf.selectcfield('adm0_a3','adm3')
+	admin1dbf.selectcfield('name','name')
+	admin1dbf.selectcfield('type_en','type')
 	admin1dbf.loadrecords()
 	for i in range(len(admin1dbf.records)):
 		r=admin1dbf.records[i]
-		print("%d: %s %s"%(i,r['sov3'],r['adm3']))
+		print("%d:\t%s\t%s.%s\t%s"%(i,r['type'],r['sov3'],r['adm3'],r['name']))
+
+def admin1linesdbf_test():
+	admin1dbf=Dbf(installfile=install.getinstallfile('admin1-lines.dbf'))
+	admin1dbf.print()
+	admin1dbf.selectcfield('SOV_A3','sov3')
+	admin1dbf.selectcfield('ADM0_A3','adm3')
+	admin1dbf.selectcfield('NAME','name')
+	admin1dbf.loadrecords()
+	for i in range(len(admin1dbf.records)):
+		r=admin1dbf.records[i]
+		print("%d:\t%s.%s.%s"%(i,r['sov3'],r['adm3'],r['name']))
 
 def webmercator_test(): # webmercator test
 	output=Output()
-	admin0=Shp(install.getfilename('admin0.shp',['110m']))
+	admin0=Shp(installfile=install.getinstallfile('admin0.shp',['110m']))
 	admin0.loadshapes()
-	coast=Shp(install.getfilename('coast.shp'))
+	coast=Shp(installfile=install.getinstallfile('coast.shp'))
 	coast.loadshapes()
 	width=1000
 	height=1000
-	print_header_svg(output,width,height,['sl','sp','tc'])
+	print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,COAST_TRIPEL_CSS])
 
 	wmc=WebMercatorCleave(True)
 
@@ -3749,7 +4477,7 @@ def webmercator_test(): # webmercator test
 				wmc.cleave(onewm)
 				if onewm.type!=NULL_TYPE_SHP:
 					flatshape=onewm.flatten(width,height)
-					flatshape.printsvg(output,cssfull='sl',csspatch='sp')
+					flatshape.printsvg(output,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 	if True:
 		for shape in coast.shapes:
 			pluses=ShapePlus.make(shape)
@@ -3758,14 +4486,15 @@ def webmercator_test(): # webmercator test
 				wmc.cleave(onewm)
 				if onewm.type!=NULL_TYPE_SHP:
 					flatshape=onewm.flatten(width,height)
-					flatshape.printsvg(output,cssline='tc')
+					flatshape.printsvg(output,cssline=COAST_TRIPEL_CSS)
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def ocean_test(): # ocean shp test
 	output=Output()
 	width=1630
 	height=990
-	print_header_svg(output,width,height,['tb','to','tg','debuggreen'])
+	print_header_svg(output,width,height,[BACK_TRIPEL_CSS,OCEAN_TRIPEL_CSS,GRID_TRIPEL_CSS,'debuggreen'])
 #	print_rectangle_svg(output,0,0,width,height,'#5685a2',1.0)
 	insetshift=Shift(5,5)
 	insetwidth=1600
@@ -3774,9 +4503,9 @@ def ocean_test(): # ocean shp test
 	onewt=TripelShape(oneplus)
 	flatshape=onewt.flatten(insetwidth,insetheight)
 	flatshape.shift(insetshift)
-	flatshape.printsvg(output,cssfull='tb')
+	flatshape.printsvg(output,cssfull=BACK_TRIPEL_CSS)
 	if True:
-		ocean=Shp(install.getfilename('ocean.shp'))
+		ocean=Shp(installfile=install.getinstallfile('ocean.shp'))
 		ocean.loadshapes()
 		for i in range(0,len(ocean.shapes)):
 			shape=ocean.shapes[i]
@@ -3795,18 +4524,19 @@ def ocean_test(): # ocean shp test
 		flatshape.shift(insetshift)
 		flatshape.printsvg(output)
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def land_test(): # land shp test
 	output=Output()
 	width=1630
 	height=990
-	print_header_svg(output,width,height,['tb','to','tg','debuggreen'])
+	print_header_svg(output,width,height,[BACK_TRIPEL_CSS,OCEAN_TRIPEL_CSS,GRID_TRIPEL_CSS,'debuggreen'])
 #	print_rectangle_svg(output,0,0,width,height,'#5685a2',1.0)
 	insetshift=Shift(5,5)
 	insetwidth=1600
 	insetheight=1600
 
-	land=Shp(install.getfilename('land.shp',['110m']))
+	land=Shp(installfile=install.getinstallfile('land.shp',['110m']))
 	land.loadshapes()
 	if False:
 		land.printinfo()
@@ -3818,7 +4548,7 @@ def land_test(): # land shp test
 	onewt=TripelShape(oneplus)
 	flatshape=onewt.flatten(insetwidth,insetheight)
 	flatshape.shift(insetshift)
-	flatshape.printsvg(output,cssfull='tb')
+	flatshape.printsvg(output,cssfull=BACK_TRIPEL_CSS)
 	if True:
 #		for i in range(0,len(land.shapes)):
 		print('land.shapes.len:%d'%(len(land.shapes)),file=sys.stderr)
@@ -3842,6 +4572,7 @@ def land_test(): # land shp test
 		flatshape.shift(insetshift)
 		flatshape.printsvg(output)
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 class MinusPoint():
 	@staticmethod
@@ -3909,6 +4640,11 @@ class WorldMinus():
 	def buildindex(self):
 		self.index={}
 		self.addtoindex2(self.points)
+	def isin2(self,pmlonlat,qmlonlat):
+		a=self.index.get(pmlonlat,None)
+		if not a: return False
+		if qmlonlat in a: return True
+		return False
 	def isin(self,p,q):
 		a=self.index.get(p.mlonlat,None)
 		if not a: return False
@@ -4192,7 +4928,7 @@ class WorldCompress():
 			self.startblob('LAO.LAO')
 			set1=('VNM.VNM','KHM.KHM','MMR.MMR','THA.THA','CH1.CHN','PRK.PRK','KOR.KOR',
 					'KAS.KAS',
-					'MNG.MNG','RUS.RUS','KAZ.KAZ','NPL.NPL','BTN.BTN','IND.IND','PAK.PAK',
+					'MNG.MNG','RUS.RUS','KA1.KAZ','NPL.NPL','BTN.BTN','IND.IND','PAK.PAK',
 					'BGD.BGD'
 					)
 			set2=('KGZ.KGZ','TJK.TJK')
@@ -4206,7 +4942,7 @@ class WorldCompress():
 			self.startblob('LAO.LAO')
 			set1=('VNM.VNM','KHM.KHM','MMR.MMR','THA.THA','CH1.CHN','PRK.PRK','KOR.KOR',
 					'KAS.KAS',
-					'MNG.MNG','RUS.RUS','KAZ.KAZ','NPL.NPL','BTN.BTN','IND.IND','PAK.PAK',
+					'MNG.MNG','RUS.RUS','KA1.KAZ','NPL.NPL','BTN.BTN','IND.IND','PAK.PAK',
 					'BGD.BGD'
 					)
 			set2=('KGZ.KGZ','TJK.TJK','UZB.UZB','TKM.TKM')
@@ -4277,7 +5013,7 @@ class WorldCompress():
 			set1=('ARG.ARG','PRY.PRY','CHL.CHL', 'BOL.BOL', 'PER.PER', 'ECU.ECU', 'COL.COL','VEN.VEN', 'GUY.GUY', 'SUR.SUR', 'FR1.FRA', 'BRA.BRA')
 			self.startblob('URY.URY')
 			for gsg in set1: self.addtoblob(gsg)
-	def addnorthamerica(self):
+	def addnorthamerica(self,isusacan):
 		if self.shp.installfile.scale=='10m':
 			if self.shp.installfile.nickname=='admin0-lakes.shp':
 				set1=('CRI.CRI','NIC.NIC','HND.HND','GTM.GTM','BLZ.BLZ','SLV.SLV','MEX.MEX','US1.USA')
@@ -4288,9 +5024,12 @@ class WorldCompress():
 				self.startblob('PAN.PAN')
 				for gsg in set1: self.addtoblob(gsg)
 		elif self.shp.installfile.scale=='50m':
-			set1=('CRI.CRI','NIC.NIC','HND.HND','GTM.GTM','BLZ.BLZ','SLV.SLV','MEX.MEX','US1.USA','CAN.CAN','US1.USA')
+			set1=('CRI.CRI','NIC.NIC','HND.HND','GTM.GTM','BLZ.BLZ','SLV.SLV','MEX.MEX')
 			self.startblob('PAN.PAN')
 			for gsg in set1: self.addtoblob(gsg)
+			if not isusacan:
+				set2=('US1.USA','CAN.CAN','US1.USA')
+				for gsg in set2: self.addtoblob(gsg)
 	def addeurope(self):
 		if self.shp.installfile.scale=='10m':
 			if self.shp.installfile.nickname=='admin0-lakes.shp':
@@ -4340,7 +5079,7 @@ class WorldCompress():
 			if isscand:
 				self.startblob('SWE.SWE')
 				self.addtoblob('FI1.FIN')
-	def addcontinents(self,label=''):
+	def addcontinents(self,label='',isusacan=False):
 		if self.shp.installfile.scale=='10m':
 			print('Not making worldcompress for 10m: %s'%label,file=sys.stderr)
 			return
@@ -4349,7 +5088,7 @@ class WorldCompress():
 		if isverbose_global: print('Europe ',end='',file=sys.stderr,flush=True)
 		self.addeurope()
 		if isverbose_global: print('North America ',end='',file=sys.stderr,flush=True)
-		self.addnorthamerica()
+		self.addnorthamerica(isusacan)
 		if isverbose_global: print('South America ',end='',file=sys.stderr,flush=True)
 		self.addsouthamerica()
 		if isverbose_global: print('Africa ',end='',file=sys.stderr,flush=True)
@@ -4409,33 +5148,75 @@ def worldcompress_test():
 	wc.removeoverlaps(admin0.shapes,2)
 #	admin0.setdraworder(admin0.bynickname['NAM.NAM'].index,-1,0)
 
-	print_header_svg(output,width,height,['sb','sl','sp','debugl','sh','sq','sw','sr'],isgradients=True)
+	print_header_svg(output,width,height,[BORDER_SPHERE_CSS,LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl',HIGH_LAND_SPHERE_CSS,PATCH_HIGH_LAND_SPHERE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS],isgradients=True)
 
 	pluses=wc.getpluses(isnegatives=False,isoverlaps=False)
-	pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull='sl',csspatch='sp')
+	pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 
 	if False:
 		negatives=wc.getnegatives()
-		pluses_sphere_print_svg(output,negatives,rotation,width,height,4, cssfull='sw',csspatch='sr')
+		pluses_sphere_print_svg(output,negatives,rotation,width,height,4, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS)
 
 	if False:
 		pluses=admin0.getlakes()
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull='sw',csspatch='sr')
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS)
 
 	if False:
 		pluses=wc.getpluses(ispositives=False,isoverlaps=True)
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssline='sb')
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,4, cssline=BORDER_SPHERE_CSS)
 
 	if False:
-		for one in admin0.shapes: one_sphere_print_svg(output,one,0,rotation,width,height,4,cssfull='sh',csspatch='sq')
+		for one in admin0.shapes: one_sphere_print_svg(output,one,0,rotation,width,height,4,cssfull=HIGH_LAND_SPHERE_CSS,csspatch=PATCH_HIGH_LAND_SPHERE_CSS)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
+
+def png_test():
+	if not zlib:
+		print('zlib not found, this feature requires zlib')
+		return
+	(width,height)=(500,500)
+
+	hypso=Hypso(width,height,'./hypsocache','')
+	if not hypso.loadpng_cache():
+		if not hypso.loadraw_cache():
+			hs=HypsoSphere(install.getfilename('hypso-lr_sr_ob_dr.pnm',['10m']))
+#			hs=HypsoSphere('ned/10m-hypso/hypso_ht_sr_ob_dr_6000_3000.pnm')
+			hs.setcenter(-110,47)
+#			hs.setzoom(.25,.25,.5,.5)
+			hypso.loadsphere(hs)
+			hypso.saveraw_cache(True)
+		else:
+#			hypso.removealpha()
+			p=Palette()
+			p.loaddefaults()
+			print('Indexing colors',file=sys.stderr)
+			hypso.indexcolors(p)
+		hypso.savepng_cache(True)
+
+	if False:
+		print('Making png and writing to /tmp/out.png',file=sys.stderr)
+		b=hypso.getpng(ismime=False)
+		f=open('/tmp/out.png','wb')
+		f.write(b)
+		f.close()
+	else:
+		print('Making png and writing to /tmp/out.svg',file=sys.stderr)
+		b=hypso.getpng(ismime=True)
+		f=open('/tmp/out.svg','w')
+		print('<?xml version="1.0" encoding="UTF-8" standalone="no"?>',file=f)
+		print('<svg xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" height="%d" width="%d">' % (height,width),file=f)
+		print('<image x="0" y="0" width="%d" height="%d" xlink:href="data:image/png;base64,'%(width,height),end='',file=f)
+		f.write(b)
+		print('" />',file=f)
+		print('</svg>',file=f)
+		f.close()
 
 def ccw_test():
 	ifile=install.getinstallfile('admin0.shp',['10m'])
-	admin0=Shp(ifile.filename,ifile)
+	admin0=Shp(installfile=ifile)
 	admin0.loadshapes()
-	admin0dbf=Dbf(install.getfilename('admin0.dbf',['10m']))
+	admin0dbf=Dbf(installfile=install.getinstallfile('admin0.dbf',['10m']))
 	admin0dbf.selectcfield('SOV_A3','sov3')
 	admin0dbf.selectcfield('ADM0_A3','adm3')
 	admin0dbf.loadrecords()
@@ -4462,13 +5243,11 @@ def ccw_test():
 			if not pg.iscw or pg.ccwtype:
 				print('%d: %d points (%d..%d), iscw:%s ccwtype:%s'%(i,k-j,j,k,pg.iscw,ccwtype_tostring(pg.ccwtype)),file=sys.stdout)
 	
-	
-
 def tripel_test(): # Winkel Tripel test
 	output=Output()
 	width=500
 	height=500
-	print_header_svg(output,width,height,['tb','to','tg'])
+	print_header_svg(output,width,height,[BACK_TRIPEL_CSS,OCEAN_TRIPEL_CSS,GRID_TRIPEL_CSS])
 #	print_rectangle_svg(output,0,0,width,height,'#5685a2',1.0)
 	insetshift=Shift(5,5)
 	insetwidth=400
@@ -4477,9 +5256,9 @@ def tripel_test(): # Winkel Tripel test
 	onewt=TripelShape(oneplus)
 	flatshape=onewt.flatten(insetwidth,insetheight)
 	flatshape.shift(insetshift)
-	flatshape.printsvg(output,cssfull='tb')
+	flatshape.printsvg(output,cssfull=BACK_TRIPEL_CSS)
 	if True:
-		ocean=Shp(install.getfilename('ocean.shp'))
+		ocean=Shp(installfile=install.getinstallfile('ocean.shp'))
 		ocean.loadshapes()
 		for shape in ocean.shapes:
 			pluses=ShapePlus.make(shape)
@@ -4488,7 +5267,7 @@ def tripel_test(): # Winkel Tripel test
 				if onewt.type!=NULL_TYPE_SHP:
 					flatshape=onewt.flatten(insetwidth,insetheight)
 					flatshape.shift(insetshift)
-					flatshape.printsvg(output,cssfull='to')
+					flatshape.printsvg(output,cssfull=OCEAN_TRIPEL_CSS)
 	tripel_lonlat_print_svg(output,insetwidth,insetheight,insetshift)
 	if False:
 		oneplus=ShapePlus.makeflatbox(False)
@@ -4498,23 +5277,23 @@ def tripel_test(): # Winkel Tripel test
 		flatshape.printsvg(output)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def zoom_test(): # zoom test
 	output=Output()
 	width=1000
 	height=1000
-	admin0=ShpAdmin('admin0-nolakes.shp',['110m'])
+	admin0=ShpAdmin('admin0-nolakes.shp',['50m'])
 	index=admin0.bynickname['LAO.LAO'].index
 	partindex=-1
 	scale=2
 	boxd=1/(2*scale)
-	boff=-int(scale*width/2)+int(width/2)
-	zoomshift=Shift(boff,boff)
-	bzc=BoxZoomCleave(scale,-boxd,boxd,-boxd,boxd,zoomshift)
+	shift=Shift(int(width/4),int(height/4))
+	bzc=BoxZoomCleave(boxd,boxd,int(width/2),int(height/2),4,shift)
 	(lon,lat)=admin0.getcenter(index,[0])
 	sr=SphereRotation()
 	sr.set_deglonlat(lon,lat)
-	print_header_svg(output,width,height,['zl','debugzp'])
+	print_header_svg(output,width,height,[LAND_ZOOM_CSS,'debugzp'])
 	print_rectangle_svg(output,0,0,width,height,'#000000',1.0)
 	print_rectangle_svg(output,200,200,600,600,'#5685a2',1.0)
 	hc=HemiCleave()
@@ -4528,25 +5307,24 @@ def zoom_test(): # zoom test
 			bzc.cleave(onesphere)
 #			onesphere.print(file=sys.stdout)
 			if onesphere.type!=NULL_TYPE_SHP:
-				flatshape=onesphere.flatten(scale*width,scale*height,4)
-				bzc.shift(flatshape)
-#				flatshape.print(file=sys.stdout)
-				flatshape.printsvg(output,cssfull='zl',csspatch='debugzp')
+				flatshape=bzc.flatten(onesphere)
+				flatshape.printsvg(output,cssfull=LAND_ZOOM_CSS,csspatch='debugzp')
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
-def province_test(): # province test
+def province_test(): # look at admin1 shapes, replaced with admin1_test
 	output=Output()
 	width=1000
 	height=1000
-	admin0=Shp(install.getfilename('admin0.shp',['10m']))
+	admin0=Shp(installfile=install.getinstallfile('admin0.shp',['10m']))
 	admin0.loadshapes()
-	admin1=Shp(install.getfilename('admin1.shp',['10m']))
+	admin1=Shp(installfile=install.getinstallfile('admin1.shp',['10m']))
 	admin1.loadshapes()
-	admin1dbf=Dbf(install.getfilename('admin1.dbf',['10m']))
+	admin1dbf=Dbf(installfile=install.getinstallfile('admin1.dbf',['10m']))
 	admin1dbf.selectcfield('sov_a3','sov3')
 	admin1dbf.selectcfield('adm0_a3','adm3')
 	admin1dbf.loadrecords()
-	print_header_svg(output,width,height,['tl','tp','tl1','tp1'])
+	print_header_svg(output,width,height,[LAND_TRIPEL_CSS,PATCH_LAND_TRIPEL_CSS,'tl1','tp1'])
 	wmc=WebMercatorCleave(False)
 	for shape in admin0.shapes:
 		pluses=ShapePlus.make(shape)
@@ -4555,7 +5333,7 @@ def province_test(): # province test
 			wmc.cleave(onewm)
 			if onewm.type!=NULL_TYPE_SHP:
 				flatshape=onewm.flatten(width,height)
-				flatshape.printsvg(output,cssfull='tl',csspatch='tp')
+				flatshape.printsvg(output,cssfull=LAND_TRIPEL_CSS,csspatch=PATCH_LAND_TRIPEL_CSS)
 	for i in range(len(admin1dbf.records)):
 		r=admin1dbf.records[i]
 		if r['sov3']=='MEX' and r['adm3']=='MEX':
@@ -4569,28 +5347,30 @@ def province_test(): # province test
 					flatshape=onewm.flatten(width,height)
 					flatshape.printsvg(output,cssfull='tl1',csspatch='tp1')
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def admin0info_test():
-	admin0=Shp(install.getfilename('admin0.shp'))
+	admin0=Shp(installfile=install.getinstallfile('admin0.shp',['10m']))
 	admin0.printinfo()
 
 def admin0parts_test():
 	scales=['110m']
-	scales=['10m']
 	scales=['50m']
+	scales=['10m']
 
 	gsgs=['RUS.RUS']
 	gsgs=['TTO.TTO']
 	gsgs=['ATA.ATA']
 	gsgs=['CYP.CYP','CYN.CYN']
+	gsgs=['GB1.IOT']
 
 	sfi=install.getinstallfile('admin0-nolakes.shp',scales)
 	print('shp filename: %s'%sfi.filename)
-	admin0=Shp(sfi.filename)
+	admin0=Shp(installfile=sfi)
 	admin0.loadshapes()
-	dfi=install.getinstallfile(sfi.nickname[:-3]+'dbf',scales)
+	dfi=install.getinstallfile('admin0-nolakes.dbf',[sfi.scale])
 	print('dbf filename: %s'%dfi.filename)
-	admin0dbf=Dbf(dfi.filename)
+	admin0dbf=Dbf(installfile=dfi)
 	admin0dbf.selectcfield('SOV_A3','sov3')
 	admin0dbf.selectcfield('ADM0_A3','adm3')
 	admin0dbf.loadrecords()
@@ -4623,9 +5403,13 @@ def print_lat_label_svg(output,lon1,lon2,lat,text,width,height,rotation,fontstep
 		for i in range(len(text)):
 			s=text[i:i+1]
 			yoff=slope*xoff
+			output.countcss(SHADOW_FONT_CSS)
+			output.countcss(TEXT_FONT_CSS)
 			output.print('<text x="0" y="0" class="fs" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp1.ux+xoff,fp1.uy+yoff,textangle,s))
 			output.print('<text x="0" y="0" class="ft" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp1.ux+xoff,fp1.uy+yoff,textangle,s))
 			xoff+=fontstep
+	output.countcss(SHADOW_FONT_CSS)
+	output.countcss(TEXT_FONT_CSS)
 	output.print('<text x="0" y="0" class="fs" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp1.ux,fp1.uy,textangle,text))
 	output.print('<text x="0" y="0" class="ft" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp1.ux,fp1.uy,textangle,text))
 
@@ -4653,10 +5437,14 @@ def print_lon_label_svg(output,lat1,lat2,lon,text,width,height,rotation,fontstep
 		for i in range(len(text)):
 			s=text[i:i+1]
 			xoff=islope*yoff
+			output.countcss(SHADOW_FONT_CSS)
+			output.countcss(TEXT_FONT_CSS)
 			output.print('<text x="0" y="0" class="fs" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp2.ux+xoff,fp2.uy+yoff,textangle,s))
 			output.print('<text x="0" y="0" class="ft" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp2.ux+xoff,fp2.uy+yoff,textangle,s))
 			yoff+=fontstep
 	else:
+		output.countcss(SHADOW_FONT_CSS)
+		output.countcss(TEXT_FONT_CSS)
 		output.print('<text x="0" y="0" class="fs" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp2.ux,fp2.uy,textangle,text))
 		output.print('<text x="0" y="0" class="ft" transform="translate(%d,%d) rotate(%u)">%s</text>'%(fp2.ux,fp2.uy,textangle,text))
 
@@ -4760,7 +5548,6 @@ class CornerCleave():
 		if False: #idebug
 			print('Creating intersection from %f,%f to %f,%f, made %f,%f'%(s.y,s.z,n.y,n.z,y,z),file=sys.stderr)
 
-
 		x=math.sqrt(1-y*y-z*z)
 
 		i=SpherePoint()
@@ -4786,20 +5573,23 @@ def sphere_test(): # test simple sphere
 	width=1000
 	height=1000
 	rotation=SphereRotation()
+	rotation.set_deglonlat(0,0) # some rotations will break on Antarctica w/o antarctica fix, see sphere2_test
 	scale='50m'
-	admin0=Shp(install.getfilename('admin0-nolakes.shp',[scale]))
+	admin0=Shp(installfile=install.getinstallfile('admin0-nolakes.shp',[scale]))
+#	admin0=Shp('ned/10m-admin/ne_10m_admin_1_states_provinces_lines.shp')
 	admin0.loadshapes()
 
-	print_header_svg(output,width,height,['sl','sp','debugl','c4'],isgradients=True)
+	print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl',FOUR_CIRCLE_CSS],isgradients=True)
 	print_roundwater_svg(output,width)
 
 	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull='sl',csspatch='sp')
+		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,cssline='debugl')
 
 	dll=DegLonLat(0,0)
-	dll_sphere_print_svg(output,dll,rotation,width,height,'c4')
+	dll_sphere_print_svg(output,dll,rotation,width,height,FOUR_CIRCLE_CSS)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 class ShpAdminShape():
 	def __init__(self,shape,nickname):
@@ -4819,6 +5609,8 @@ class ShpAdminShape():
 		elif self.type==POINT_TYPE_SHP:
 			self.point=shape.point
 			self.draworder=0
+		elif self.type==NULL_TYPE_SHP:
+			pass
 		else: raise ValueError
 	def extractpart(self,partindex):
 		(start,limit)=Shape.getpartstartlimit(self,partindex)
@@ -4841,21 +5633,11 @@ class ShpAdminShape():
 			self.partlist[i]-=delta
 		self.pointscount-=delta
 	def printparts(self,file=sys.stderr): return Shape.printparts(self,file=file)
+	def print(self,prefix='',file=sys.stdout): return Shape.print(self,prefix=prefix,file=file)
 	def getmbr(self,partindices): return Shape.getmbr(self,partindices)
 	def getcenter(self,partindices): return Shape.getcenter(self,partindices)
 	def setdraworder(self,partidx,draworder): return Shape.setdraworder(self,partidx,draworder)
-	def hasdraworder(self,draworder):
-		has=False
-		hasmore=False
-		if self.type==POINT_TYPE_SHP:
-			if self.draworder==draworder: has=True
-			elif self.draworder>draworder: hasmore=True
-		else:
-			for i in range(self.partscount):
-				d=self.draworderlist[i]
-				if d==draworder: has=True
-				elif d>draworder: hasmore=True
-		return (has,hasmore)
+	def hasdraworder(self,draworder): return Shape.hasdraworder(self,draworder)
 	def fixantarctica(self,partindex):
 		points=self.extractpart(partindex)
 
@@ -4881,7 +5663,7 @@ class ShpAdminShape():
 		del points[start:stop+1]
 
 		self.replacepart(partindex,points)
-	def fixrussia(self,partindex,tailpartindex,istrimhead=False,istrimtail=False):
+	def fixrussia(self,partindex,tailpartindex,istrimhead=False,istrimtail=False,isfix10mpoint=False,isdebug=False):
 		tailpoints=self.extractpart(tailpartindex)
 		tailpg=Polygon.makefrompoints(tailpoints,True,self.index,tailpartindex)
 		tailminus=WorldMinus(tailpg,nickname='Russia tail')
@@ -4892,8 +5674,14 @@ class ShpAdminShape():
 			p=tailminus.points[i]
 			if p.mlonlat[0]<=-1799999000:
 				fixcount+=1
+				if isfix10mpoint:
+					if p.mlonlat[1]==689823698:
+						p.mlonlat=(0,689810503)
+						if isdebug: print('Found 10mpoint')
 				if istrimtail:
+# 50m nolakes: Deleting point from tail: (-180.000000,65.311963) .. (-180.000000,68.738672)
 					if p.mlonlat[1] > 650672363 and p.mlonlat[1] < 689834472:
+						if isdebug: print('Deleting point from tail: %s'%tailminus.points[i].dll)
 						del tailminus.points[i]
 						continue
 				p.mlonlat=(1800000000,p.mlonlat[1])
@@ -4910,11 +5698,12 @@ class ShpAdminShape():
 				if p.mlonlat[0]>=1800000000:
 					fixcount+=1
 					if p.mlonlat[1] > 650672363 and p.mlonlat[1] < 689834472:
+						if isdebug: print('Deleting point from head: %s'%tailminus.points[i].dll)
 						del mainminus.points[i]
 						continue
 				i+=1
 
-#		if fixcount: print('Fixed %d points in russiafix'%fixcount,file=sys.stderr)
+		if isverbose_global and fixcount: print('Fixed %d points in russiafix'%fixcount,file=sys.stderr)
 
 		blob=WorldBlob(mainminus)
 		if not blob.addtoblob_minus(tailminus): raise ValueError
@@ -4927,10 +5716,13 @@ class ShpAdminShape():
 class ShpAdminShapeIntersection():
 	def __init__(self):
 		self.pointslist=[]
+		self.mbr=Mbr()
 	def addpolygon(self,pg):
 		if not pg.iscw: return # all polygons are CW
 		points=[]
-		for p in pg.points: points.append(p.clone())
+		for p in pg.points:
+			self.mbr.add(p.lon,p.lat)
+			points.append(p.clone())
 		self.pointslist.append(points)
 	def addfromplus(self,plus):
 		pg=plus.polygons[0]
@@ -4947,8 +5739,10 @@ class ShpAdminShapeIntersection():
 		for points in self.pointslist:
 			for p in points: p.side=-1
 	def setinside(self,shape):
+		mbr=shape.mbr;
+		if not self.mbr.isintersects(mbr): return
 		pluses=ShapePlus.make(shape)
-		mbr=shape.getmbr([-1])
+#		mbr=shape.getmbr([-1])
 		for points in self.pointslist:
 			for p in points:
 				if p.side==1: continue
@@ -4986,38 +5780,165 @@ class ShpAdminShapeIntersection():
 				cur=None
 		return ret
 
-class ShpAdmin():
-	def __init__(self,filename,scales):
-		self.filename=filename
-		self.installfile=install.getinstallfile(filename,scales)
+class ShpAdminPart():
+	def __init__(self,filenickname,scales):
+		self.filename=filenickname
+		self.installfile=install.getinstallfile(filenickname,scales)
 		if not self.installfile:
-			print('Couldn\'t find admin0 shp file (%s)'%str(scales),file=sys.stderr)
+			print('Couldn\'t find %s file (%s)'%(filenickname,str(scales)),file=sys.stderr)
 			raise ValueError
 		self.scale=self.installfile.scale
-		self.admin0shp=Shp(self.installfile.filename,self.installfile)
-		if isverbose_global: print('Loading admin0 shape data (%s)'%self.scale,file=sys.stderr)
-		self.admin0shp.loadshapes()
+		self.shp=Shp(installfile=self.installfile)
+		if isverbose_global: print('Loading %s shape data (%s)'%(filenickname,self.scale),file=sys.stderr)
+		self.shp.loadshapes()
 		self.shapes=[]
 		self.bynickname={}
-
-		dbfname=self.installfile.nickname[:-3]+'dbf'
-		self.dbf=Dbf(install.getfilename(dbfname,[self.scale]))
-		if isverbose_global: print('Loading admin0 dbf data (%s)'%self.scale,file=sys.stderr)
-		self.dbf.selectcfield('SOV_A3','sov3')
-		self.dbf.selectcfield('ADM0_A3','adm3')
+		self.dbfname=self.installfile.nickname[:-3]+'dbf'
+		self.dbf=Dbf(installfile=install.getinstallfile(self.dbfname,[self.scale]))
+	def bynickname2(self,nick):
+		for s in self.shapes:
+			if s.nickname.startswith(nick): return s
+		return None
+	def addshape(self,shape,nickname):
+		sas=ShpAdminShape(shape,nickname)
+		if nickname:
+#			if nickname in self.bynickname: print('Duplicate nickname:',nickname,file=sys.stderr)
+			self.bynickname[nickname]=sas
+		self.shapes.append(sas)
+	def loadnicktrips(self,nicktrips):
+		for np in nicktrips:
+			sas=self.shapes[np[0]]
+			if np[2] and np[2]!=sas.nickname:
+				print('Skipping dbf rename (mismatch): %s!=%s'%(np,sas.nickname),file=sys.stderr)
+				continue
+			sas.nickname=np[1]
+			self.bynickname[np[1]]=sas
+	def loaddbf(self,fields):
+		for f in fields: self.dbf.selectcfield(f[0],f[1])
 		self.dbf.loadrecords()
 		for i in range(self.dbf.numrecords):
 			r=self.dbf.records[i]
-			nickname=r['sov3']+'.'+r['adm3']
-			self.addshape(self.admin0shp.shapes[i],nickname)
+			vals=[]
+			for f in fields: vals.append(r[f[1]])
+			nickname='.'.join(vals)
+			self.addshape(self.shp.shapes[i],nickname)
+	def loadadmin0dbf(self):
+		if isverbose_global: print('Loading admin0 data (%s,%s)'%(self.dbfname,self.scale),file=sys.stderr)
+		self.loaddbf( ( ('SOV_A3','sov3') , ('ADM0_A3','adm3') ) )
+	def loadlakesdbf(self):
+		if isverbose_global: print('Loading lakes data (%s,%s)'%(self.dbfname,self.scale),file=sys.stderr)
+		self.loaddbf( ( ('name','name'), ) )
+		nicktrips=[]
+		if self.scale=='50m':
+			if self.dbf.numrecords==275:
+				nicktrips=((266,'_deadseasouth',None),) # this was for version 4.1
+			elif self.dbf.numrecords==412:
+				nicktrips=((264,'_deadseasouth','Dead Sea'),) # for version 5.0
+			else:
+				print('Unrecognized lakes, %d records at scale %s'%(self.dbf.numrecords,self.scale),file=sys.stderr)
+		self.loadnicktrips(nicktrips)
+	def loaddisputeddbf(self):
+		if isverbose_global: print('Loading disputed dbf data (%s,%s)'%(self.dbfname,self.scale),file=sys.stderr)
+		self.loaddbf( ( ('SOV_A3','sov3'), ('ADM0_A3','adm3'), ('BRK_NAME','name') ) )
+	def loadadmin1dbf(self):
+		if isverbose_global: print('Loading admin1 dbf data (%s,%s)'%(self.dbfname,self.scale),file=sys.stderr)
+		self.loaddbf( ( ('sov_a3','sov3'), ('adm0_a3','adm3'), ('name','name'),('type_en','type') ) )
+	def loadadmin1linesdbf(self):
+		if isverbose_global: print('Loading admin1 lines data (%s,%s)'%(self.dbfname,self.scale),file=sys.stderr)
+		self.loaddbf( ( ('SOV_A3','sov3'), ('ADM0_A3','adm3'), ('NAME','name') ) )
+
+class ShpAdminLines():
+	def __init__(self,shapes,prefix):
+		self.lines=[]
+		self.minus=None
+		self.isreduced=False
+		self.skipped=0
+		for shape in shapes:
+			if shape.type!=POLYLINE_TYPE_SHP: continue
+			if not shape.nickname.startswith(prefix): continue
+			for i in range(shape.partscount):
+				j=shape.partlist[i+1] if i+1!=shape.partscount else shape.pointscount
+				self.lines.append(shape.pointlist[shape.partlist[i]:j])
+		if isverbose_global: print('Added %d lines'%(len(self.lines)),file=sys.stderr)
+	def addpolygons(self,shapes,draworder):
+		if not self.minus:
+			self.minus=WorldMinus(None)
+			self.minus.buildindex()
+		for shape in shapes:
+			for i in range(len(shape.draworderlist)):
+				if draworder!=None and shape.draworderlist[i]!=draworder: continue
+				start=shape.partlist[i]
+				limit=shape.partlist[i+1] if i+1!=shape.partscount else shape.pointscount
+				mpoints=[]
+				for j in range(start,limit):
+					p=shape.pointlist[j]
+					mpoints.append(MinusPoint(p,shape.index))
+				self.minus.addtoindex2(mpoints)
+	def reducelines(self):
+		self.isreduced=True
+		if not self.minus: return
+		lines=self.lines
+		self.lines=[]
+		for line in lines:
+			points=[]
+			for i in range(len(line)-1):
+				p=line[i]
+				q=line[i+1]
+				pmlonlat=MinusPoint.getmlonlat(p)
+				qmlonlat=MinusPoint.getmlonlat(q)
+				if self.minus.isin2(pmlonlat,qmlonlat) or self.minus.isin2(qmlonlat,pmlonlat):
+					self.skipped+=1
+					if len(points):
+						points.append(p)
+						self.lines.append(points)
+						points=[]
+				else:
+					if not len(points): points.append(p)
+					points.append(q)
+			if len(points): self.lines.append(points)
+	def exportlines(self):
+		if not self.isreduced: self.reducelines()
+		if isverbose_global: print('Removed %d line segments'%self.skipped,file=sys.stderr)
+		ret=[]
+		for line in self.lines:
+			ret.append(ShapePlus.makelinefrompoints(line,0,0,0))
+		return ret
+		
+
+class ShpAdmin():
+	def __init__(self,filename,scales):
+		self.admin0=ShpAdminPart(filename,scales)
+		self.admin0.loadadmin0dbf()
+		self.scale=self.admin0.scale
+		self.installfile=self.admin0.installfile
+		self.shapes=self.admin0.shapes
+		self.bynickname=self.admin0.bynickname
 		self.islakesloaded=False
 		self.isdisputedloaded=False
-	def other_addshape(self,shapes,bynickname,shape,nickname):
-		sas=ShpAdminShape(shape,nickname)
-		bynickname[nickname]=sas
-		shapes.append(sas)
-	def addshape(self,shape,nickname):
-		self.other_addshape(self.shapes,self.bynickname,shape,nickname)
+		self.isadmin1loaded=False
+		self.isadmin1linesloaded=False
+	def loadlakes(self):
+		if self.islakesloaded: return
+		self.lakes=ShpAdminPart('lakes.shp',[self.scale])
+		self.lakes.loadlakesdbf()
+		self.islakesloaded=True
+	def loaddisputed(self,is10m=True):
+		scale=self.scale
+		if is10m: scale='10m'
+		if self.isdisputedloaded: return
+		self.disputed=ShpAdminPart('admin0-disputed.shp',[scale])
+		self.disputed.loaddisputeddbf()
+		self.isdisputedloaded=True
+	def loadadmin1(self):
+		if self.isadmin1loaded: return
+		self.admin1=ShpAdminPart('admin1-nolakes.shp',[self.scale])
+		self.admin1.loadadmin1dbf()
+		self.isadmin1loaded=True
+	def loadadmin1lines(self):
+		if self.isadmin1linesloaded: return
+		self.admin1lines=ShpAdminPart('admin1-lines.shp',[self.scale])
+		self.admin1lines.loadadmin1linesdbf()
+		self.isadmin1linesloaded=True
 	def setdraworder(self,index,partidx,draworder):
 		shape=self.shapes[index]
 		shape.setdraworder(partidx,draworder)
@@ -5044,90 +5965,37 @@ class ShpAdmin():
 			ata.fixantarctica(0)
 			ata.ccwtypes[0]=CW_CCWTYPE
 		else: raise ValueError
-	def fixrussia(self):
+	def fixrussia(self,isdebug=False):
 		rus=self.bynickname['RUS.RUS']
 		if self.installfile.scale=='50m':
 			if rus.partscount!=101: raise ValueError
-			rus.fixrussia(18,17,istrimtail=True)
+			rus.fixrussia(18,17,istrimtail=True,isdebug=isdebug)
 			rus.ccwtypes[18]=CW_CCWTYPE
 		elif self.installfile.scale=='10m':
 			if rus.partscount!=214: raise ValueError
-			rus.fixrussia(0,3) # this is for nolakes, lakes is probably 0,5
+			rus.fixrussia(0,3,isfix10mpoint=True,isdebug=isdebug) # 0,3 is for nolakes, lakes is probably 0,5
 			rus.ccwtypes[0]=CW_CCWTYPE
 		else: raise ValueError
 	def makecyprusfull(self):
-		nickname='_cyprusfull'
+		nickname='cyprusfull'
 		names=['CYP.CYP','CNM.CNM','CYN.CYN']
 		sc=ShapeCompress(-1)
 		for n in names:
 			if not n in self.bynickname: continue
 			sc.addshape(self.bynickname[n])
 		shape=sc.exportshape()
-		self.addshape(shape,nickname)
-	def loadlakes(self):
-		if self.islakesloaded: return
-		if isverbose_global: print('Loading lakes data (%s)'%self.scale,file=sys.stderr)
-		self.islakesloaded=True
-		self.lakes_ifile=install.getinstallfile('lakes.shp',[self.scale])
-		if not self.lakes_ifile:
-			print('Couldn\'t find lakes file (%s)'%self.scale,file=sys.stderr)
-			raise ValueError
-		self.lakes_shp=Shp(self.lakes_ifile.filename,self.lakes_ifile)
-		self.lakes_shp.loadshapes()
-		self.lakes_shapes=[]
-		self.lakes_bynickname={}
-
-		self.lakes_dbf=Dbf(install.getfilename('lakes.dbf',[self.scale]))
-		if isverbose_global: print('Loading lakes dbf data (%s)'%self.scale,file=sys.stderr)
-		self.lakes_dbf.selectcfield('name','name')
-		self.lakes_dbf.loadrecords()
-
-		for i in range(self.lakes_dbf.numrecords):
-			r=self.lakes_dbf.records[i]
-			nickname=r['name']
-			self.other_addshape(self.lakes_shapes,self.lakes_bynickname,self.lakes_shp.shapes[i],nickname)
-		if self.lakes_dbf.numrecords==275 and self.scale=='50m':
-			nickpairs=((266,'_deadseasouth'),)
-			for np in nickpairs:
-				sas=self.lakes_shapes[np[0]]
-				if sas.nickname: continue
-				sas.nickname=np[1]
-				self.lakes_bynickname[np[1]]=sas
-		else:
-			print('Unrecognized lakes, %d records at scale %s'%(self.lakes_dbf.numrecords,self.scale),file=sys.stderr)
+		self.admin0.addshape(shape,nickname)
 	def getlakes(self):
 		self.loadlakes()
 		ret=[]
-		for shape in self.lakes_shapes:
+		for shape in self.lakes.shapes:
 			pluses=ShapePlus.make(shape)
 			for plus in pluses: ret.append(plus)
 		return ret
-	def loaddisputed(self):
-		if self.isdisputedloaded: return
-		if isverbose_global: print('Loading disputed data (%s)'%self.scale,file=sys.stderr)
-		self.isdisputedloaded=True
-		self.disputed_ifile=install.getinstallfile('admin0-disputed.shp',[self.scale])
-		if not self.disputed_ifile:
-			print('Couldn\'t find admin0 disputed file (%s)'%self.scale,file=sys.stderr)
-			raise ValueError
-		self.disputed_shp=Shp(self.disputed_ifile.filename,self.disputed_ifile)
-		self.disputed_shp.loadshapes()
-		self.disputed_shapes=[]
-		self.disputed_bynickname={}
-
-		self.disputed_dbf=Dbf(install.getfilename('admin0-disputed.dbf',[self.scale]))
-		if isverbose_global: print('Loading disputed dbf data (%s)'%self.scale,file=sys.stderr)
-		self.disputed_dbf.selectcfield('BRK_NAME','name')
-		self.disputed_dbf.loadrecords()
-
-		for i in range(self.disputed_dbf.numrecords):
-			r=self.disputed_dbf.records[i]
-			nickname=r['name']
-			self.other_addshape(self.disputed_shapes,self.disputed_bynickname,self.disputed_shp.shapes[i],nickname)
 	def selectdisputed(self,names,draworder):
 		self.loaddisputed()
 		for n in names:
-			shape=self.disputed_bynickname[n]
+			shape=self.disputed.bynickname[n]
 			shape.setdraworder(-1,draworder)
 	
 def sphere2_test(): # test ShpAdmin
@@ -5135,43 +6003,48 @@ def sphere2_test(): # test ShpAdmin
 	width=1000
 	height=1000
 	rotation=SphereRotation()
-	scale='50m'
+	scale='10m'
 
 	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin0.fixantarctica()
 	admin0.fixrussia()
 	admin0.setccwtypes()
 
-	(lon,lat)=admin0.bynickname['JPN.JPN'].getcenter([-1])
+	gsg='AU1.CSI'
+	(lon,lat)=admin0.bynickname[gsg].getcenter([-1])
 	rotation.set_deglonlat(lon,lat)
+	admin0.bynickname[gsg].setdraworder(-1,1)
+	print('Center set to %f,%f'%(lon,lat),file=sys.stderr)
 
-	scale=1
+	scale=2
 	if scale==1:
 		bzc=None
 	else:
 		boxd=1/scale
-		boff=-int(scale*width/2)+int(width/2)
-		shift=Shift(boff,boff)
-		bzc=BoxZoomCleave(scale,-boxd,boxd,-boxd,boxd,shift)
+		bzc=BoxZoomCleave(boxd,boxd,width,height,8)
 
 	cc=CornerCleave(0,0.1,-0.1)
 	cc=None
 
 	if scale==1:
-		print_header_svg(output,width,height,['sl','sp','debugl','c4','sw','sr','sb'],isgradients=True)
+		print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl',FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS,HIGH_LAND_SPHERE_CSS,PATCH_HIGH_LAND_SPHERE_CSS],isgradients=True)
 		print_roundwater_svg(output,width)
 	else:
-		print_header_svg(output,width,height,['sl','sp','debugl','c4','sw','sr','sb'])
+		print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl',FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS,HIGH_LAND_SPHERE_CSS,PATCH_HIGH_LAND_SPHERE_CSS])
 
 	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull='sl',csspatch='sp',
+		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
 				boxzoomcleave=bzc,cornercleave=cc)
+	for one in admin0.shapes:
+		one_sphere_print_svg(output,one,1,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
+				boxzoomcleave=bzc,cornercleave=cc,islabels=True)
 
 	if False:
 		dll=DegLonLat(-82.5,42.5)
-		dll_sphere_print_svg(output,dll,rotation,width,height,'c4',boxzoomcleave=bzc)
+		dll_sphere_print_svg(output,dll,rotation,width,height,FOUR_CIRCLE_CSS,boxzoomcleave=bzc)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def disputed_test(): # find disputed shapes
 	output=Output()
@@ -5179,68 +6052,150 @@ def disputed_test(): # find disputed shapes
 	height=1000
 	rotation=SphereRotation()
 	scale='50m'
+	scale='10m'
 
 	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin0.fixantarctica()
 	admin0.fixrussia()
 	admin0.setccwtypes()
-	admin0.loaddisputed()
+	admin0.loaddisputed(is10m=False)
 
 	names=[
-		'Arunachal Pradesh', # india and china
-		'Tirpani Valleys', # india and china, border
-		'Bara Hotii Valleys', # india and china, border
-		'Demchok', # kashmir and china, border, redundant
-		'Samdu Valleys', # india and china, border
-		'Jammu and Kashmir', # india and pakistan and china, kashmir
-		'Shaksam Valley', # india pakistan and china
-		'Aksai Chin', # india and china
-		'Northern Areas', # pakistan and india and china, north of kashmir
-		'Abyei', # sudan and southsudan
-		'Lawa Headwaters', # suriname and france
-		'Courantyne Headwaters', # guyana and suriname
-		'Golan Heights', # israel and lebanon
-		'Ilemi Triangle', # kenya and south sudan
-		'W. Sahara', # w sahara and morocco
-		'N. Cyprus', # north cyprus separatists
-		'Kuril Is.', # japan and russia
-		'Somaliland', # somaliland and somalia
-		'Abkhazia', # georgia separatists
-		'Transnistria', # moldova separatists
-		'South Ossetia', # georgia separatists
-		'Nagorno-Karabakh', # azerbaijan separatists
-		'Siachen Glacier', # pakistan and india
-		'Crimea', # ukraine and russia
-		'Donbass' # ukraine separatists
+		"IND.IND.Jammu and Kashmir", # india and pakistan and china, kashmir
+		"CH1.CHN.Aksai Chin", # india and china
+"IS1.ISR.Israel", # israel ?
+		"IS1.PSX.Gaza", # egypt israel, border
+		"IS1.PSX.West Bank", # israel palestine
+		"KEN.KEN.Ilemi Triangle", # kenya and south sudan
+		"IND.IND.Arunachal Pradesh", # india and china
+		"IS1.ISR.Golan Heights", # israel and lebanon
+		"SYR.SYR.UNDOF Zone", # syria israel, border
+		"SOL.SOL.Somaliland", # somaliland and somalia
+		"FR1.FRA.Lawa Headwaters", # suriname and france
+		"GUY.GUY.Courantyne Headwaters", # guyana and suriname
+		"KOR.KOR.Korean Demilitarized Zone (south)", # northkorea southkorea, border
+		"PRK.PRK.Korean Demilitarized Zone (north)", # northkorea southkorea, border-ish (is this a dupe?)
+		"MAR.MAR.W. Sahara", # w sahara and morocco
+		"SAH.SAH.W. Sahara", # morocco wsahara, this is usa's version of wsahara
+		"GEO.B35.Abkhazia", # georgia separatists
+		"GEO.B37.South Ossetia", # georgia separatists
+		"KOS.KOS.Kosovo", # kosovo serbia
+		"ESP.ESP.Ceuta", # morocco spain, border
+		"GUY.GUY.West of Essequibo River", # venezuela guyana
+		"AZE.AZE.Artsakh", # azerbaijan separatists, aka Nagorno-Karabakh
+		"HRV.HRV.Dragonja River", # croatia slovenia, border
+		"CH1.CHN.Shaksam Valley", # india pakistan and china
+		"PAK.PAK.Gilgit-Baltistan", # pakistan india china, north of kashmir, aka Northern Areas
+		"ESP.ESP.Melilla", # morocco spain, border
+		"CU1.USG.Guantanamo Bay USNB", # cuba usa, border
+		"IND.IND.Near Om Parvat", # india nepal, border
+		"BRI.BRI.Brazilian Island", # brazil uruguay, border
+		"ESP.ESP.Olivenza", # portugal spain, border
+		"MDA.MDA.Transnistria", # moldova separatists
+		"UKR.UKR.Donbass", # ukraine separatists
+		"GB1.GIB.Gibraltar", # spain uk, border
+		"SDN.SDN.Abyei", # sudan and southsudan
+		"IND.IND.Demchok", # kashmir and china, border, redundant
+		"IND.IND.Samdu Valleys", # india and china, border
+		"IND.IND.Tirpani Valleys", # india and china, border
+		"IND.IND.Bara Hotii Valleys", # india and china, border
+		"CYN.CYN.N. Cyprus", # cyprus, northcyprus separatists
+		"CNM.CNM.Cyprus U.N. Buffer Zone", # cyprus northcyprus
+		"KAS.KAS.Siachen Glacier", # pakistan and india
+		"KA1.KAB.Baykonur", # kazakhstan russia, dispute appears over?
+		"BLZ.BLZ.Belize", # guatemala belize
+		"SPI.SPI.Southern Patagonian Ice Field", # chile argentina, border
+		"BTN.BTN.Bhutan (northwest valleys)", # china bhutan
+		"BTN.BTN.Bhutan (Chumbi salient)", # china bhutan
+		"RUS.RUS.Crimea", # ukraine and russia
+		"IS1.ISR.Shebaa Farms", # lebanon syria israel, border
+		"SDS.SDS.Ilemi Triange", # kenya southsudan, border
+		"BRA.BRA.Corner of Artigas", # brazil uruguay, border
+		"BRT.BRT.Bir Tawil", # egypt sudan, both sides claim it's the other's
+		"EGY.EGY.Halayib Triangle", # egypt sudan
+		"SRB.SRB.Vukovar Island", # serbia croatia, border
+		"SRB.SRB.Šarengrad Island", # serbia croatia, border
+		"IS1.ISR.East Jerusalem", # israel palestine, border
+		"IS1.ISR.No Man's Land (Fort Latrun)", # israel palestine, border
+		"PAK.PAK.Azad Kashmir", # pakistan india, border-ish
+		"IS1.ISR.No Man's Land (Jerusalem)", # israel palestine, border
+		"IS1.ISR.Mount Scopus", # israel palestine, border
+		"IND.IND.Junagadh and Manavadar", # pakistan india
+		"TWN.TWN.Taiwan", # taiwan china
+		"EGY.EGY.Tiran and Sanafir Is.", # saudiarabia egypt, border
+		"FR1.ATF.Juan De Nova I.", # france madagascar, border
+		"FR1.FRA.Mayotte", # comoros france, border
+		"GB1.IOT.Diego Garcia NSF", # mauritius seychelles uk, border
+		"RUS.RUS.Kuril Is.", # japan and russia
+		"GB1.IOT.Br. Indian Ocean Ter.", # mauritius seychelles uk, border
+		"GB1.SGS.S. Sandwich Is.", # argentina uk, border
+		"GB1.SGS.S. Georgia", # argentina uk, border-ish
+		"GB1.FLK.Falkland Is.", # uk argentina
+		"CH1.CHN.Paracel Is.", # vietnam china taiwan, border
+		"FR1.ATF.Europa Island", # france madagascar, border
+		"US1.ASM.Swains Island", # americansamoa newzealand, border
+		"PGA.PGA.Spratly Is.", # china malaysia philippines taiwan vietnam brunei, border
+		"VEN.VEN.Bird Island", # barbados dominica saintkitsandnevis saintlucia saintvincent venezuela, border (only claim non-EEZ) (aves i.)
+		"US1.UMI.Wake Atoll", # usa marshallislands, border
+		"KOR.KOR.Korean islands under UN jurisdiction", # northkorea southkorea, border (aka northwest islands)
+		"GB1.GBR.Rockall I.", # ireland uk, border, ireland only claims uk doesn't have EEZ
+		"US1.UMI.Navassa I.", # usa haiti, border
+		"FR1.ATF.Bassas da India", # france madagascar, border
+		"FR1.ATF.Tromelin I.", # mauritius france, border
+		"FR1.ATF.Glorioso Is.", # france madagascar, border
+		"JPN.JPN.Pinnacle Is.", # china taiwan japan, border (senkaku)
+		"IRN.IRN.Abu Musa I.", # iran uae, border
+		"BJN.BJN.Bajo Nuevo Bank (Petrel Is.)", # colombia honduras nicaragua jamaica usa, border
+		"SER.SER.Serranilla Bank", # colombia honduras nicaragua jamaica usa, border
+		"BLZ.BLZ.Sapodilla Cayes", # honduras belize, border
+		"DN1.GRL.Hans Island", # denmark canada, border
+		"KOR.KOR.Dokdo", # japan southkorea, border (liancourt)
+		"GAB.GAB.Mbane Island", # gabon equatorialguinea, border
+		"ESP.ESP.Peñón de Vélez de la Gomera", # morocco spain, border
+		"ESP.ESP.Penon de Alhucemas", # morocco spain, border
+		"ESP.ESP.Islas Chafarinas", # morocco spain, border
+		"ESP.ESP.Isla del Perejil", # morocco spain, border
+		"FR1.NCL.Matthew and Hunter Is.", # vanuatu france, border
+		"SCR.SCR.Scarborough Reef", # china philippines taiwan, border
+		"ERI.ERI.Doumera Island" # djibouti eritrea, border
 		]
-	name=names[24]
+	name=names[96]
+
+	if False:
+		oldnames=[
+			"AZE.AZE.Nagorno-Karabakh", # azerbaijan separatists, renamed to Artsakh
+			"PAK.PAK.Northern Areas", # pakistan and india and china, north of kashmir, renamed to Gilgit-Baltistan
+			"CHL.CHL.Atacama corridor", # chile bolivia (exists in v4, not in v5? why?)
+		]
 	scale=4
 	print('Inspecting %s'%name,file=sys.stderr)
 
-	disputed=admin0.disputed_bynickname[name]
+	disputed=admin0.disputed.bynickname[name]
 
 	(lon,lat)=disputed.getcenter([-1])
 	rotation.set_deglonlat(lon,lat)
 	if scale==1:
 		bzc=None
-		print_header_svg(output,width,height,['sl','sp','debugl','debuggreen','c4','sw','sr','sb'],isgradients=True)
+		print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl','debuggreen',FOUR_CIRCLE_CSS,SHADOW_FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS],isgradients=True)
 		print_roundwater_svg(output,width)
 	else:
 		boxd=1/scale
-		boff=-int(scale*width/2)+int(width/2)
-		shift=Shift(boff,boff)
-		bzc=BoxZoomCleave(scale,-boxd,boxd,-boxd,boxd,shift)
-		print_header_svg(output,width,height,['sl','sp','debugl','debuggreen','c4','sw','sr','sb'])
+		bzc=BoxZoomCleave(boxd,boxd,width,height,8)
+		print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl','debuggreen',FOUR_CIRCLE_CSS,SHADOW_FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS])
 
-	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull='sl',csspatch='sp',
-				boxzoomcleave=bzc)
-	one_sphere_print_svg(output,disputed,0,rotation,width,height,8,cssfull='debuggreen',csspatch='sp',
+	if True:
+		for one in admin0.shapes:
+			one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
+					boxzoomcleave=bzc)
+
+	print_centerdot_svg(output,lon,lat,20,FOUR_CIRCLE_CSS,SHADOW_FOUR_CIRCLE_CSS,rotation,width,height,boxzoomcleave=bzc)
+	one_sphere_print_svg(output,disputed,0,rotation,width,height,8,cssfull='debuggreen',csspatch=PATCH_LAND_SPHERE_CSS,
 			boxzoomcleave=bzc)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
-def borderlakes_test(): # find lakes that intersect with borders
+def borderlakes_test(): # find lakes that intersect with borders # this is obsolete, we now just check all lakes every run
 	output=Output()
 	width=1000
 	height=1000
@@ -5261,35 +6216,79 @@ def borderlakes_test(): # find lakes that intersect with borders
 		bzc=None
 	else:
 		boxd=1/scale
-		boff=-int(scale*width/2)+int(width/2)
-		shift=Shift(boff,boff)
-		bzc=BoxZoomCleave(scale,-boxd,boxd,-boxd,boxd,shift)
+		bzc=BoxZoomCleave(boxd,boxd,width,height,8)
 	cc=None
 
 	if scale==1:
-		print_header_svg(output,width,height,['sl','sp','debugl','c4','sw','sr','sb','ft','fs'],isgradients=True)
+		print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl',FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS,TEXT_FONT_CSS,SHADOW_FONT_CSS],isgradients=True)
 		print_roundwater_svg(output,width)
 	else:
-		print_header_svg(output,width,height,['sl','sp','debugl','c4','sw','sr','sb','ft','fs'])
+		print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl',FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS,TEXT_FONT_CSS,SHADOW_FONT_CSS])
 
 	for one in admin0.shapes:
-		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull='sl',csspatch='sp',
+		one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
 				boxzoomcleave=bzc,cornercleave=cc)
 
 	pluses=admin0.getlakes()
 	for plus in pluses:
 		plus.shape
-		oneplus_sphere_print_svg(output,plus,rotation,width,height,4, cssfull='sw',csspatch='sr',
+		oneplus_sphere_print_svg(output,plus,rotation,width,height,4, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS,
 				boxzoomcleave=bzc,cornercleave=cc)
 		p=plus.polygons[0].points[0]
-		if text_sphere_print_svg(output,p,str(plus.shape.index),rotation,width,height,cssfont='ft',cssfontshadow='fs', boxzoomcleave=bzc):
+		if text_sphere_print_svg(output,p,str(plus.shape.index),rotation,width,height,cssfont=TEXT_FONT_CSS,cssfontshadow=SHADOW_FONT_CSS, boxzoomcleave=bzc):
 			print('%d:"%s" '%(plus.shape.index,plus.shape.nickname),file=sys.stderr)
 			if scale!=1:
 				q=p.clone()
 				q.lat-=2/scale
-				text_sphere_print_svg(output,q,plus.shape.nickname,rotation,width,height,cssfont='ft',cssfontshadow='fs', boxzoomcleave=bzc)
+				text_sphere_print_svg(output,q,plus.shape.nickname,rotation,width,height,cssfont=TEXT_FONT_CSS,cssfontshadow=SHADOW_FONT_CSS, boxzoomcleave=bzc)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
+
+def admin1_test(): # look at admin1 shapes
+	output=Output()
+	width=1000
+	height=1000
+	rotation=SphereRotation()
+	scale='50m'
+	scale='10m'
+
+	admin=ShpAdmin('admin0-nolakes.shp',[scale])
+	admin.fixantarctica()
+	admin.fixrussia()
+	admin.setccwtypes()
+	admin.loadadmin1()
+
+	shape2=None
+	if False:
+		shape1=admin.admin1.shapes[36] # row 38 is Karonga, not Chitipa
+		shape2=admin.admin1.shapes[336] # row 338 is Chitipa, correctly
+	if True:
+		shape1=admin.admin1.shapes[2250] # Cork County
+		shape2=admin.admin1.shapes[2251] # Cork City
+
+	scale=10
+	(lon,lat)=shape1.getcenter([-1])
+	rotation.set_deglonlat(lon,lat)
+
+	boxd=1/scale
+	bzc=BoxZoomCleave(boxd,boxd,width,height,8)
+	print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,'debugl','debugred','debuggreen',FOUR_CIRCLE_CSS,SHADOW_FOUR_CIRCLE_CSS,WATER_SPHERE_CSS,PATCH_WATER_SPHERE_CSS,BORDER_SPHERE_CSS])
+
+	if True:
+		for one in admin.shapes:
+			one_sphere_print_svg(output,one,0,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
+					boxzoomcleave=bzc)
+
+#	print_centerdot_svg(output,lon,lat,20,FOUR_CIRCLE_CSS,SHADOW_FOUR_CIRCLE_CSS,rotation,width,height,boxzoomcleave=bzc)
+	one_sphere_print_svg(output,shape1,0,rotation,width,height,8,cssfull='debuggreen',csspatch=PATCH_LAND_SPHERE_CSS,
+			boxzoomcleave=bzc)
+	if shape2:
+		one_sphere_print_svg(output,shape2,0,rotation,width,height,8,cssfull='debugred',csspatch=PATCH_LAND_SPHERE_CSS,
+				boxzoomcleave=bzc)
+
+	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def sphere3_test(): # test merging ShapePlus to reduce border drawing, this is obsolete by WorldCompress and worldcompress_test
 	output=Output()
@@ -5299,9 +6298,9 @@ def sphere3_test(): # test merging ShapePlus to reduce border drawing, this is o
 	lon_center=0
 	rotation=SphereRotation()
 
-	admin0=Shp(install.getfilename('admin0.shp'))
+	admin0=Shp(installfile=install.getinstallfile('admin0.shp'))
 	admin0.loadshapes()
-	admin0dbf=Dbf(install.getfilename('admin0.dbf'))
+	admin0dbf=Dbf(installfile=install.getinstallfile('admin0.dbf'))
 	admin0dbf.selectcfield('SOV_A3','sov3')
 	admin0dbf.selectcfield('ADM0_A3','adm3')
 	admin0dbf.loadrecords()
@@ -5313,7 +6312,7 @@ def sphere3_test(): # test merging ShapePlus to reduce border drawing, this is o
 		(grp,subgrp)=gsg.split('.')
 		indices.append(admin0dbf.query1({'sov3':grp,'adm3':subgrp}))
 
-	print_header_svg(output,width,height,['sl','sp','sb'])
+	print_header_svg(output,width,height,[LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,BORDER_SPHERE_CSS])
 	print_rectangle_svg(output,0,0,width,height,'#ffffff',1.0)
 
 	one=admin0.shapes[admin0dbf.query1({'sov3':'NAM','adm3':'NAM'})]
@@ -5337,7 +6336,7 @@ def sphere3_test(): # test merging ShapePlus to reduce border drawing, this is o
 		hc.cleave(onesphere)
 		if onesphere.type!=NULL_TYPE_SHP:
 			flatshape=onesphere.flatten(width,height,8)
-			flatshape.printsvg(output,cssfull='sl',csspatch='sp')
+			flatshape.printsvg(output,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 	if False:
 		for onepl in allextracts:
 			oneplus=ShapePlus.makefrompolyline(onepl,0)
@@ -5345,8 +6344,9 @@ def sphere3_test(): # test merging ShapePlus to reduce border drawing, this is o
 			hc.cleave(onesphere)
 			if onesphere.type!=NULL_TYPE_SHP:
 				flatshape=onesphere.flatten(width,height,8)
-				flatshape.printsvg(output,cssline='sb')
+				flatshape.printsvg(output,cssline=BORDER_SPHERE_CSS)
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def isallin(big,small):
 	for s in small:
@@ -5376,7 +6376,7 @@ def compressshapes(shp,draworder):
 	groups.append(['BGD.BGD','IND.IND','NPL.NPL','BTN.BTN','PAK.PAK','AFG.AFG'])
 	groups.append(['SAU.SAU','YEM.YEM','OMN.OMN','ARE.ARE'])
 	groups.append(['IRQ.IRQ','KWT.KWT','IRN.IRN','SYR.SYR','TUR.TUR','JOR.JOR'])
-	groups.append(['KAZ.KAZ','UZB.UZB','ARM.ARM','KGZ.KGZ','TJK.TJK','TKM.TKM','AZE.AZE','GEO.GEO'])
+	groups.append(['KA1.KAZ','UZB.UZB','ARM.ARM','KGZ.KGZ','TJK.TJK','TKM.TKM','AZE.AZE','GEO.GEO'])
 	groups.append(['ETH.ETH','SOM.SOM','SOL.SOL','DJI.DJI','ERI.ERI','KEN.KEN','TZA.TZA','UGA.UGA','RWA.RWA','BDI.BDI'])
 	groups.append(['PRT.PRT','ESP.ESP'])
 	groups.append(['MAR.MAR','SAH.SAH','DZA.DZA','MLI.MLI','MRT.MRT','TUN.TUN'])
@@ -5435,9 +6435,9 @@ def sphere4_test(): # merge ShapePlus to reduce border drawing, this is obsolete
 	rotation=SphereRotation()
 	rotation.set_deglonlat(2.213390,23)
 
-	admin0=Shp(install.getfilename('admin0.shp',['10m']))
+	admin0=Shp(installfile=install.getinstallfile('admin0.shp',['10m']))
 	admin0.loadshapes()
-	admin0dbf=Dbf(install.getfilename('admin0.dbf',['10m']))
+	admin0dbf=Dbf(installfile=install.getinstallfile('admin0.dbf',['10m']))
 	admin0dbf.selectcfield('SOV_A3','sov3')
 	admin0dbf.selectcfield('ADM0_A3','adm3')
 	admin0dbf.loadrecords()
@@ -5460,7 +6460,7 @@ def sphere4_test(): # merge ShapePlus to reduce border drawing, this is obsolete
 		pluses=ShapePlus.make(one)
 		for p in pluses: hpluses.append(p)
 
-	print_header_svg(output,width,height,['sb','sl','sp','si','sh','sq'],isgradients=True)
+	print_header_svg(output,width,height,[BORDER_SPHERE_CSS,LAND_SPHERE_CSS,PATCH_LAND_SPHERE_CSS,HIGH_BORDER_SPHERE_CSS,HIGH_LAND_SPHERE_CSS,PATCH_HIGH_LAND_SPHERE_CSS],isgradients=True)
 	print_rectangle_svg(output,0,0,width,height,'#ffffff',1.0)
 	print_roundwater_svg(output,width)
 
@@ -5473,15 +6473,16 @@ def sphere4_test(): # merge ShapePlus to reduce border drawing, this is obsolete
 				pass
 			else:
 				flatshape=onesphere.flatten(width,height,8)
-				flatshape.printsvg(output,cssline='sb',cssfull='sl',csspatch='sp')
+				flatshape.printsvg(output,cssline=BORDER_SPHERE_CSS,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS)
 	for oneplus in hpluses:
 		onesphere=SphereShape(oneplus,rotation)
 		hc.cleave(onesphere)
 		if onesphere.type!=NULL_TYPE_SHP:
 			flatshape=onesphere.flatten(width,height,8)
-			flatshape.printsvg(output,cssline='si',cssfull='sh',csspatch='sq')
+			flatshape.printsvg(output,cssline=HIGH_BORDER_SPHERE_CSS,cssfull=HIGH_LAND_SPHERE_CSS,csspatch=PATCH_HIGH_LAND_SPHERE_CSS)
 
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def lonlat_test(): # test lon/lat text labels
 	output=Output()
@@ -5492,7 +6493,7 @@ def lonlat_test(): # test lon/lat text labels
 
 	rotation=SphereRotation()
 	rotation.set_deglonlat(lon_center,lat_center)
-	print_header_svg(output,width,height,['ft','fs','sg'],isgradients=True)
+	print_header_svg(output,width,height,[TEXT_FONT_CSS,SHADOW_FONT_CSS,GRID_SPHERE_CSS],isgradients=True)
 	print_roundwater_svg(output,width)
 	arcs_lonlat_print_svg(output,rotation,width,height)
 	labely=rotation.dlon
@@ -5505,6 +6506,7 @@ def lonlat_test(): # test lon/lat text labels
 	for label in [ (-60,'60°S'), (-30,'30°S'), (0,'0°'), (30,'30°N'), (60,'60°N')]:
 		print_lat_label_svg(output,70,75,label[0]+0.5,label[1],width,height,rotation,8)
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 
 def print_ellipse_svg(output,cx,cy,rx,ry):
 	xl=cx-rx
@@ -5595,6 +6597,7 @@ class FlatLongitude():
 		rotdeg=self.angle
 
 		if rx<1 or ry<1:
+			output.countcss(cssclass)
 			output.print('<path class="%s" d="M%d,%dL%d,%dZ"/>'%(cssclass,x1,y1,x2,y2))
 			return
 
@@ -5605,16 +6608,20 @@ class FlatLongitude():
 					(self.top.ux,self.top.uy, self.bottom.ux,self.bottom.uy))
 		if self.tiltdeg>=0:
 			if self.londeg>90:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, %.8f, 0 0, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry,rotdeg, x2,y2 ))
 			else:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, %.8f, 0 1, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry,rotdeg, x2,y2 ))
 		else:
 			if self.londeg>90:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, %.8f, 0 1, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry,rotdeg, x2,y2 ))
 			else:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, %.8f, 0 0, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry,rotdeg, x2,y2 ))
 
@@ -5662,6 +6669,7 @@ class FlatLatitude():
 		rx=self.left.distanceto(self.right)/2.0
 		ry=self.top.distanceto(self.bottom)/2.0
 		if rx<1 or ry<1:
+			output.countcss(cssclass)
 			output.print('<path class="%s" d="M%d,%dL%d,%dZ"/>'%(cssclass,x1,y1,x2,y2))
 			return
 		if False:
@@ -5671,16 +6679,20 @@ class FlatLatitude():
 					(self.top.ux,self.top.uy, self.bottom.ux,self.bottom.uy))
 		if self.tiltdeg>0:
 			if self.latdeg>0:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, 0, 1 0, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry, x2,y2 ))
 			else:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, 0, 0 0, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry, x2,y2 ))
 		else:
 			if self.latdeg>0:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, 0, 0 1, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry, x2,y2 ))
 			else:
+				output.countcss(cssclass)
 				output.print('<path class="%s" d="M %.4f %.4f A %.4f %.4f, 0, 1 1, %.4f %.4f"/>'%
 						(cssclass,x1,y1, rx,ry, x2,y2 ))
 
@@ -5707,7 +6719,7 @@ def lonlat2_test(): # test ellipse paths for lines
 	output=Output()
 	width=1000
 	height=1000
-	print_header_svg(output,width,height,['sg'],isgradients=True)
+	print_header_svg(output,width,height,[GRID_SPHERE_CSS],isgradients=True)
 	print_roundwater_svg(output,width)
 #	for i in range(8): lon=i*45+10
 	for lon in [ 0, -30, -60, -90, 30, 60 ]:
@@ -5716,7 +6728,7 @@ def lonlat2_test(): # test ellipse paths for lines
 		rotation.set_deglonlat(lon,23)
 		c=SphereCircle(rotation)
 		fc=c.flatten(width,height)
-		fc.printsvg(output,'sg')
+		fc.printsvg(output,GRID_SPHERE_CSS)
 	for lon in [ 0, -30, -60, -90, 30, 60 ]:
 		lon+=10
 		rotation=SphereRotation()
@@ -5724,21 +6736,25 @@ def lonlat2_test(): # test ellipse paths for lines
 		e=SphereLongitude.make(rotation,0) # 0 is untested, we changed how this works
 		if e==None: continue
 		fe=e.flatten(width,height)
-		fe.printsvg(output,'sg')
+		fe.printsvg(output,GRID_SPHERE_CSS)
 	print_footer_svg(output)
+	output.writeto(sys.stdout)
 	
 
 def dicttostr(label,d):
 	isfirst=True
+	names=[]
+	for n in d: names.append(n)
+	names.sort()
 	a=[]
 	a.append(label+' : {')
-	for n in d:
+	for n in names:
 		a.append('\t\''+str(n)+'\' : \''+str(d[n])+'\'')
 	a.append('}')
 	return '\n'.join(a)
 
 def loaddbf_locatormap(shp):
-	dbf=Dbf(install.getfilename('admin0.dbf',[shp.installfile.scale]))
+	dbf=Dbf(installfile=install.getinstallfile('admin0.dbf',[shp.installfile.scale]))
 	if isverbose_global: print('Loading admin0 dbf data (%s)'%shp.installfile.scale,file=sys.stderr)
 	dbf.selectcfield('SOV_A3','sov3')
 	dbf.selectcfield('ADM0_A3','adm3')
@@ -5754,7 +6770,7 @@ def loadshp_locatormap(m):
 	if not ifile:
 		print('Couldn\'t find admin0 shp file (%s)'%m,file=sys.stderr)
 		raise ValueError
-	shp=Shp(ifile.filename,ifile)
+	shp=Shp(installfile=ifile)
 	if isverbose_global: print('Loading admin0 shape data (%s)'%m,file=sys.stderr)
 	shp.loadshapes()
 	return shp
@@ -5805,12 +6821,32 @@ def locatormap(output,overrides):
 	options['fullm']='10m'
 	options['splitlimit']=4
 	options['isfullhighlight']=False
+#	options['borderlakes']=None
 	options['isdisputed']=False
+	options['zoomlon']=None
+	options['zoomlat']=None
+	options['zoomdisputedcssforce']=DISPUTED_BORDER_ZOOM_CSS
+	options['zoomdisputedbordercssforce']=DISPUTED_BORDER_ZOOM_CSS
+	options['bgcolor']=None
+	options['hypso']=None
+	options['hypsocache']=None
+	options['hypsocutout']=True
+	options['hypsodim']=options['width']
 
 	if True:
-		pub=dict(overrides)
-		if 'copyright' in pub: del pub['copyright']
-		options['comment']=dicttostr('settings',pub)
+		more={}
+		for n in overrides:
+			if n.startswith('locatormap_'): more[n[11:]]=overrides[n]
+		for n in more: overrides[n]=more[n]
+
+	publicfilter=('cmdline','title','comment','version')
+
+	if True:
+		pub={}
+		for n in overrides:
+			if n not in publicfilter: continue
+			pub[n]=overrides[n]
+		options['comment']=dicttostr('vars',pub)
 	for n in overrides: options[n]=overrides[n]
 
 	full_admin0=ShpAdmin('admin0-nolakes.shp',[options['fullm']])
@@ -5842,7 +6878,8 @@ def locatormap(output,overrides):
 	zoom_index=options['zoom_index']
 
 	if full_index<0:
-		print('No location specified?',file=sys.stderr)
+		print('error: full_index=%d'%(full_index),file=sys.stderr)
+		print('No location specified or given location isn\'t global?',file=sys.stderr)
 		return
 
 	if options['issubland']:
@@ -5919,20 +6956,27 @@ def euromap(output,overrides):
 	options['splitlimit']=4
 	options['labelfont']='14px sans'
 	options['gsgs']=None
-	options['borderlakes']=[]
+#	options['borderlakes']=None
 	options['ispartlabels']=False
 	options['euromapdots_50m']=None
-	allowedoverrides=['comment','copyright','width','height','islakes','spherem','splitlimit','labelfont','gsgs','borderlakes',
+	allowedoverrides=['comment','copyright','width','height','islakes','spherem','splitlimit','labelfont','gsgs',
 			'ispartlabels','euromapdots_50m']
-	publicoverrides=['comment','width','height','islakes','spherem','splitlimit','labelfont','gsg','gsgs','borderlakes',
-			'ispartlabels','euromapdots_50m']
+	publicfilter=('cmdline','title','comment','version')
+
+	if True:
+		more={}
+		for n in overrides:
+			if n.startswith('euromap_'): more[n[8:]]=overrides[n]
+		for n in more: overrides[n]=more[n]
 
 	if 'gsg' in overrides: options['gsgs']=[overrides['gsg']]
+
 	if True:
 		pub={}
 		for n in overrides:
-			 if n in publicoverrides: pub[n]=overrides[n]
-		options['comment']=dicttostr('settings',pub)
+			if n not in publicfilter: continue
+			pub[n]=overrides[n]
+		options['comment']=dicttostr('vars',pub)
 
 	for n in overrides:
 		 if n in allowedoverrides: options[n]=overrides[n]
@@ -5948,16 +6992,14 @@ def euromap(output,overrides):
 	admin0.fixrussia()
 	admin0.makecyprusfull()
 	admin0.setccwtypes()
-	admin0.loadlakes()
+	if options['islakes']: admin0.loadlakes()
 
 	(lon,lat)=admin0.bynickname['DEU.DEU'].getcenter([-1])
 	rotation.set_deglonlat(lon-6,lat)
 
 	zoomscale=2
 	boxd=1/zoomscale
-	boff=-int(zoomscale*width/2)+int(width/2)
-	shift=Shift(boff,boff)
-	bzc=BoxZoomCleave(zoomscale,-boxd,boxd,-boxd,boxd,shift)
+	bzc=BoxZoomCleave(boxd,boxd,width,height,splitlimit)
 
 	cc=None
 
@@ -5965,7 +7007,7 @@ def euromap(output,overrides):
 # Germany Greece Hungary Ireland Italy Latvia Lithuania Luxembourg Malta Netherlands Poland Portugal
 # Romania Slovakia Slovenia Spain Sweden
 
-	eugsgs=['AUT.AUT','BEL.BEL','BGR.BGR','HRV.HRV','_cyprusfull','CZE.CZE','DN1.DNK','EST.EST','FI1.FIN','FR1.FRA',
+	eugsgs=['AUT.AUT','BEL.BEL','BGR.BGR','HRV.HRV','cyprusfull','CZE.CZE','DN1.DNK','EST.EST','FI1.FIN','FR1.FRA',
 			'DEU.DEU','GRC.GRC','HUN.HUN','IRL.IRL','ITA.ITA','LVA.LVA','LTU.LTU','LUX.LUX','MLT.MLT','NL1.NLD','POL.POL','PRT.PRT',
 			'ROU.ROU','SVK.SVK','SVN.SVN','ESP.ESP','SWE.SWE']
 # 'CYP.CYP','CYN.CYN','CNM.CNM'
@@ -5982,100 +7024,82 @@ def euromap(output,overrides):
 	other_wc.addafrica()
 	other_wc.addmiddleeast()
 
-	css=['sl','sp','sb','al','ap','ab','sw','sr']
-
-	if moredots:
-		m=['c1','w1']
-		for c in m: css.append(c)
-
 	if options['gsgs']:
 		for gsg in options['gsgs']:
 			if gsg in admin0.bynickname: admin0.bynickname[gsg].setdraworder(-1,3)
 			else: print('Skipping gsg:%s, not found in %s'%(gsg,options['spherem']),file=sys.stderr)
-		css.append('sh')
-		css.append('sq')
 
 	eu_wc.removeoverlaps(admin0.shapes,3) # remove draworder 3 (highlights) from border polylines
 
 	euborderlakeshapes=[]
 	if 'EST.EST' not in options['gsgs']: 
-		euborderlakes=['Pskoyskoye Ozero', 'Lake Peipus']
 		sasi=ShpAdminShapeIntersection()
 		pluses=eu_wc.getpluses(isnegatives=False,isoverlaps=False)
 		for plus in pluses:
 			sasi.addfromplus(plus)
-		for n in euborderlakes:
-			l=admin0.lakes_bynickname[n]
-			if not l:
-				print('Border lake (%s) not found: %s'%(options['spherem'],n),file=sys.stderr)
-				continue
+		for l in admin0.lakes.shapes:
 			sasi.setinside(l)
 		euborderlakeshapes=sasi.exportlines()
 
 	gsgborderlakeshapes=[]
-	if True:
+	if options['islakes']:
 		sasi=ShpAdminShapeIntersection()
 		sasi.addfromshapes(admin0.shapes,3)
-		for n in options['borderlakes']:
-			l=admin0.lakes_bynickname[n]
-			if not l:
-				print('Border lake (%s) not found: %s'%(options['spherem'],n),file=sys.stderr)
-				continue
+		for l in admin0.lakes.shapes:
 			sasi.setinside(l)
 		gsgborderlakeshapes=sasi.exportlines()
-		if len(gsgborderlakeshapes): css.append('si')
 
-	print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']])
+#	print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']])
 	print_squarewater_svg(output,width)
 
 	if True: # draw plain background countries
 		for one in admin0.shapes:
-			one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
+			one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
 					boxzoomcleave=bzc,cornercleave=cc)
 
 	if True: # draw worldcompress continents
 		pluses=other_wc.getpluses(isnegatives=False,isoverlaps=False)
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sl',csspatch='sp',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,boxzoomcleave=bzc)
 
 		pluses=eu_wc.getpluses(isnegatives=False,isoverlaps=False)
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='al',csspatch='ap',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull=AREA_LAND_SPHERE_CSS,csspatch=PATCH_AREA_LAND_SPHERE_CSS,boxzoomcleave=bzc)
 
 	if True: # draw andorra, switzerland, halflights and highlights
 		for one in admin0.shapes:
-			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull='sl',csspatch='sp',
+			one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
 					boxzoomcleave=bzc,cornercleave=cc)
 
 		for one in admin0.shapes:
-			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull='al',csspatch='ap',
+			one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull=AREA_LAND_SPHERE_CSS,csspatch=PATCH_AREA_LAND_SPHERE_CSS,
 					boxzoomcleave=bzc,cornercleave=cc)
 
 		for one in admin0.shapes:
-			one_sphere_print_svg(output,one,3,rotation,width,height,splitlimit,cssfull='sh',csspatch='sq',
+			one_sphere_print_svg(output,one,3,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,csspatch=PATCH_HIGH_LAND_SPHERE_CSS,
 					boxzoomcleave=bzc,cornercleave=cc,islabels=options['ispartlabels'])
 
 	if True: # draw continent ccws
 		negatives=eu_wc.getnegatives()
-		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS,boxzoomcleave=bzc)
 		negatives=other_wc.getnegatives()
-		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,negatives,rotation,width,height,splitlimit, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS,boxzoomcleave=bzc)
 
 	if True: # draw lakes
 		pluses=admin0.getlakes()
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull='sw',csspatch='sr',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS,boxzoomcleave=bzc)
 
 	if True: # draw continent borders, intersections with highlights already removed
 		pluses=other_wc.getpluses(ispositives=False,isoverlaps=True)
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='sb',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline=BORDER_SPHERE_CSS,boxzoomcleave=bzc)
 		pluses=eu_wc.getpluses(ispositives=False,isoverlaps=True)
-		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline='ab',boxzoomcleave=bzc)
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssline=AREA_BORDER_SPHERE_CSS,boxzoomcleave=bzc)
 
 	if True: # draw highlight intersections with lakes over lakes
 		for plus in euborderlakeshapes:
 			if plus.type!=POLYLINE_TYPE_SHP: continue
-			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='sb',boxzoomcleave=bzc)
+			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=BORDER_SPHERE_CSS,boxzoomcleave=bzc)
 		for plus in gsgborderlakeshapes:
 			if plus.type!=POLYLINE_TYPE_SHP: continue
-			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline='si',boxzoomcleave=bzc)
+			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=HIGH_BORDER_SPHERE_CSS,boxzoomcleave=bzc)
 
 	if moredots:
 		for dots in moredots:
@@ -6084,1096 +7108,2492 @@ def euromap(output,overrides):
 			sds=int((dots[1]*width)/1000)
 			isw=dots[2]
 			smalldots=dots[3]
-			cssclass='c1' # only c1/w1 are included in css above
-			if isinstance(isw,bool) and isw: cssclass='c4'
-			elif isw==1: cssclass='c1'
-			elif isw==2: cssclass='c2'
-			elif isw==3: cssclass='c3'
-			elif isw==4: cssclass='c4'
-			cssclass2='w'+cssclass[1]
+			cssclass=ONE_CIRCLE_CSS # only c1/w1 are included in css above
+			if isinstance(isw,bool) and isw: cssclass=FOUR_CIRCLE_CSS
+			elif isw==1: cssclass=ONE_CIRCLE_CSS
+			elif isw==2: cssclass=TWO_CIRCLE_CSS
+			elif isw==3: cssclass=THREE_CIRCLE_CSS
+			elif isw==4: cssclass=FOUR_CIRCLE_CSS
+			cssclass2=getshadow_circle_css(cssclass)
 			print_zoomdots_svg(output,shape,smalldots,sds,cssclass,cssclass2,rotation,width,height,boxzoomcleave=bzc)
 
 	print_footer_svg(output)
+	if True:
+		o=Output()
+		print_header_svg(o,width,height,output.csscounts,options['labelfont'],[options['copyright'],options['comment']])
+		output.prepend(o)
+
+def countrymap(output,overrides):
+	options={}
+	options['comment']=''
+	options['copyright']=''
+	options['width']=1000
+	options['height']=1000
+	options['islakes']=True
+	options['spherem']='10m'
+	options['splitlimit']=4
+	options['labelfont']='14px sans'
+	options['gsgs']=None
+#	options['borderlakes']=None
+	options['ispartlabels']=False
+	options['countrymapdots_10m']=None
+	options['centerindices_10m']=None
+	options['countryzoom']=1
+	options['countrylon']=None
+	options['countrylat']=None
+	options['admin1']=None
+	options['disputed']=None
+	options['disputed_border']=None
+	options['admin1dot']=None
+	options['admin1dots']=0
+	options['bgcolor']=None
+	options['hypso']=None
+	options['hypsocache']=None
+	options['hypsofast']=None
+	options['hypsocutout']=True
+	options['hypsodim']=options['width']
+	allowedoverrides=['comment','copyright','width','height','islakes','spherem','splitlimit','labelfont','gsg','gsgs',
+			'ispartlabels','countrymapdots_10m','countryzoom','centerindices_10m','countrylon','countrylat','admin1','admin1dot','admin1dots',
+			'disputed','disputed_border','bgcolor','hypso','hypsocache','hypsofast','hypsocutout','hypsodim']
+	publicfilter=('cmdline','title','comment','version')
+
+	if True:
+		more={}
+		for n in overrides:
+			if n.startswith('countrymap_'): more[n[11:]]=overrides[n]
+		for n in more: overrides[n]=more[n]
+
+	if overrides['countryzoom']>=4: # TODO tweak this, 8x is good at hr
+		if 'hypso_high' in overrides: overrides['hypso']=overrides['hypso_high']
+
+	if 'countrymapcenterindices_10m' in overrides:
+		overrides['centerindices_10m']=overrides['countrymapcenterindices_10m']
+
+	if 'gsg' in overrides: options['gsgs']=[overrides['gsg']]
+	if True:
+		pub={}
+		for n in overrides:
+			if n not in publicfilter: continue
+			pub[n]=overrides[n]
+		options['comment']=dicttostr('vars',pub)
+
+	for n in overrides:
+		 if n in allowedoverrides: options[n]=overrides[n]
+
+	if options['hypso']:
+		if not zlib:
+			print('hypso feature requires zlib dependency and it wasn\'t found, quitting',file=sys.stderr)
+			return
+		options['islakes']=False
+
+	width=options['width']
+	height=options['height']
+	splitlimit=options['splitlimit']
+	rotation=SphereRotation()
+	zoomscale=options['countryzoom']
+	moredots=options['countrymapdots_10m']
+	admin1=options['admin1']
+
+	admin=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
+	admin.fixantarctica()
+	admin.fixrussia()
+	admin.setccwtypes()
+#	admin.loadlakes()
+
+	if options['disputed']: admin.selectdisputed(options['disputed'],1)
+#	if options['disputed_border']: admin.selectdisputed(options['disputed_border'],2)
+	if options['disputed_border']: admin.selectdisputed(options['disputed_border'],1) # treat borders normally
+	if admin1!=None:
+		admin.loadadmin1()
+		admin.loadadmin1lines()
+
+	if options['centerindices_10m']:
+		if isverbose_global: print('Looking for custom center: %s'%str(options['centerindices_10m']),file=sys.stderr)
+		(lon,lat)=admin.bynickname[options['gsg']].getcenter(options['centerindices_10m'])
+	else:
+		(lon,lat)=admin.bynickname[options['gsg']].getcenter([-1])
+	if options['countrylon']!=None: lon=options['countrylon']
+	if options['countrylat']!=None: lat=options['countrylat']
+	if isverbose_global: print('Centering on %f,%f'%(lon,lat),file=sys.stderr)
+	rotation.set_deglonlat(lon,lat)
+
+	bzc=None
+	cc=None
+	if zoomscale:
+		boxd=1/zoomscale
+		bzc=BoxZoomCleave(boxd,boxd,width,height,splitlimit)
+
+	if options['hypso']:
+		isgradients=(zoomscale==1)
+#		print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']], hypso=True,isgradients=isgradients)
+		hypso=Hypso(options['hypsodim'],options['hypsodim'],'./hypsocache',options['hypsocache'])
+		if options['hypsocache']==None or not hypso.loadpng_cache():
+			if options['hypsocache']==None or not hypso.loadraw_cache():
+				hs=HypsoSphere(install.getfilename(options['hypso']+'.pnm',['10m']))
+				hs.setcenter(lon,lat)
+				if bzc:
+					hs.setzoom(bzc.right,bzc.top,bzc.right*2,bzc.top*2)
+				hypso.loadsphere(hs)
+				if options['hypsocache']!=None:
+					hypso.saveraw_cache(True)
+			p=Palette()
+			p.loaddefaults()
+			if isverbose_global: print('Indexing colors',file=sys.stderr)
+			hypso.indexcolors(p)
+			if options['hypsocache']!=None:
+				hypso.savepng_cache(True)
+		print_hypso_svg(output,width,height,hypso,options['hypsofast'],isgradients=isgradients)
+	else: # not hypso
+		if zoomscale==1:
+#			print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']],isgradients=True)
+			if options['bgcolor']: print_rectangle_svg(output,0,0,width,height,options['bgcolor'],1.0)
+			print_roundwater_svg(output,width)
+		else:
+#			print_header_svg(output,width,height,css,options['labelfont'],[options['copyright'],options['comment']])
+			print_squarewater_svg(output,width)
+
+	for gsg in options['gsgs']:
+		admin.setdraworder(admin.bynickname[gsg].index,-1,2)
+	if len(options['gsgs'])==1:
+		admin0shape=admin.admin0.bynickname[options['gsgs'][0]]
+
+	admin1shape=None
+	if admin1!=None:
+		admin1lines=ShpAdminLines(admin.admin1lines.shapes,options['gsg'])
+		if admin1:
+			admin1shape=admin.admin1.bynickname2(admin1)
+			if not admin1shape:
+				print('Couldn\'t find admin1 nickname %s in database'%admin1,file=sys.stderr)
+				raise ValueError
+			admin1shape.setdraworder(-1,3)
+			admin1lines.addpolygons([admin1shape],None)
+			admin1lines.reducelines()
+
+	if True: # draw plain background countries
+		for one in admin.shapes:
+			one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
+					boxzoomcleave=bzc,cornercleave=cc)
+		if admin1==None:
+			if options['hypso'] and options['hypsocutout']:
+				cutout_sphere_print_svg(output,admin0shape,-1,rotation,width,height,splitlimit,cssfull=HYPSOCUT_SPHERE_CSS,
+						boxzoomcleave=bzc,cornercleave=cc)
+			else:
+				for one in admin.shapes:
+					one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,csspatch=PATCH_HIGH_LAND_SPHERE_CSS,
+							boxzoomcleave=bzc,cornercleave=cc)
+		else:
+			if options['hypso'] and options['hypsocutout']:
+				for plus in admin1lines.exportlines():
+					oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=AREA_BORDER_SPHERE_CSS,
+							boxzoomcleave=bzc,cornercleave=cc)
+				if admin1shape:
+					cutout_sphere_print_svg(output,admin1shape,-1,rotation,width,height,splitlimit,cssfull=HYPSOCUT_SPHERE_CSS,
+							boxzoomcleave=bzc,cornercleave=cc)
+			else:
+				for one in admin.shapes:
+					one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=AREA_LAND_SPHERE_CSS,
+							csspatch=PATCH_AREA_LAND_SPHERE_CSS, boxzoomcleave=bzc,cornercleave=cc)
+				for plus in admin1lines.exportlines():
+					oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=AREA_BORDER_SPHERE_CSS,
+							boxzoomcleave=bzc,cornercleave=cc)
+				if admin1shape:
+					one_sphere_print_svg(output,admin1shape,3,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,
+							csspatch=PATCH_HIGH_LAND_SPHERE_CSS, boxzoomcleave=bzc,cornercleave=cc)
+		if admin1shape and options['admin1dots']:
+			print_zoomdots_svg(output,admin1shape,-1,options['admin1dots'],ONE_CIRCLE_CSS,SHADOW_ONE_CIRCLE_CSS,rotation,width,height,bzc,
+					threshhold=10)
+
+	if options['islakes']:
+		if isverbose_global: print('Drawing lakes sphere shapes',file=sys.stderr)
+		pluses=admin.getlakes()
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS,
+				boxzoomcleave=bzc,cornercleave=cc)
+
+	if options['islakes']:
+		if isverbose_global: print('Finding admin0 border lakes (%s)'%options['spherem'],file=sys.stderr)
+		sasi=ShpAdminShapeIntersection()
+		sasi.addfromshapes(admin.shapes,2)
+		for l in admin.lakes.shapes:
+			sasi.setinside(l)
+		borderlakeshapes=sasi.exportlines()
+		if admin1shape:
+			if isverbose_global: print('Finding admin1 border lakes (%s)'%options['spherem'],file=sys.stderr)
+			sasi=ShpAdminShapeIntersection()
+			sasi.addfromshapes(admin.admin1.shapes,3)
+			for l in admin.lakes.shapes:
+				sasi.setinside(l)
+			admin1_borderlakeshapes=sasi.exportlines()
+			for plus in borderlakeshapes:
+				if plus.type!=POLYLINE_TYPE_SHP: continue
+				oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=AREA_LAKELINE_SPHERE_CSS,boxzoomcleave=bzc)
+			for plus in admin1_borderlakeshapes:
+				if plus.type!=POLYLINE_TYPE_SHP: continue
+				oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=HIGH_BORDER_SPHERE_CSS,boxzoomcleave=bzc)
+		else:
+			for plus in borderlakeshapes:
+				if plus.type!=POLYLINE_TYPE_SHP: continue
+				oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=HIGH_BORDER_SPHERE_CSS,boxzoomcleave=bzc)
+
+	if True:
+		if options['disputed'] or options['disputed_border']:
+			for one in admin.disputed.shapes:
+				one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull=DISPUTED_LAND_SPHERE_CSS,csspatch=PATCH_DISPUTED_LAND_SPHERE_CSS,boxzoomcleave=bzc,cornercleave=cc)
+	if False: # there's no need to treat disputed_border specially
+		if options['disputed']:
+			for one in admin.disputed.shapes:
+				one_sphere_print_svg(output,one,1,rotation,width,height,splitlimit,cssfull=DISPUTED_LAND_SPHERE_CSS,csspatch=PATCH_DISPUTED_LAND_SPHERE_CSS,boxzoomcleave=bzc,cornercleave=cc)
+		if options['disputed_border']:
+			for one in admin.disputed.shapes:
+				one_sphere_print_svg(output,one,2,rotation,width,height,splitlimit,cssfull=DISPUTED_BORDER_SPHERE_CSS,csspatch=PATCH_DISPUTED_LAND_SPHERE_CSS,boxzoomcleave=bzc,cornercleave=cc)
+
+	if moredots:
+		shape=admin.bynickname[gsg]
+		for dots in moredots:
+			sds=int((dots[0]*width*4)/1000)
+			isw=dots[1]
+			smalldots=dots[2]
+			cssclass=ONE_CIRCLE_CSS
+			if isinstance(isw,bool) and isw: cssclass=FOUR_CIRCLE_CSS
+			elif isw==1: cssclass=ONE_CIRCLE_CSS
+			elif isw==2: cssclass=TWO_CIRCLE_CSS
+			elif isw==3: cssclass=THREE_CIRCLE_CSS
+			elif isw==4: cssclass=FOUR_CIRCLE_CSS
+			cssclass2=getshadow_circle_css(cssclass)
+			print_zoomdots_svg(output,shape,smalldots,sds,cssclass,cssclass2,rotation,width,height,boxzoomcleave=bzc)
+
+	if options['admin1dot']:
+		mbr=admin1shape.getmbr(-1)
+		(lon,lat)=mbr.getcenter()
+		r=mbr.getpseudoradius(width)
+		r+=(options['admin1dot']*width)/1000
+		print_centerdot_svg(output,lon,lat,int(r),ONE_CIRCLE_CSS,SHADOW_ONE_CIRCLE_CSS,rotation,width,height,boxzoomcleave=bzc)
+		
+
+	print_footer_svg(output)
+	if True:
+		o=Output()
+		ishypso=True if options['hypso'] else False
+		isgradients=True if zoomscale==1 else False
+		print_header_svg(o,width,height,output.csscounts,options['labelfont'],[options['copyright'],options['comment']],
+				ishypso=ishypso, isgradients=isgradients)
+		output.prepend(o)
+
+class Options():
+	@staticmethod
+	def collapsename(name):
+		accents=('é','á','ó','í','ñ','ú')
+		nocents=('e','a','o','i','n','u')
+		ellipses=(' ','\'','-',',','.','–')
+		a=list(name)
+		n=len(a)
+		i=0
+		while i<n:
+			if a[i] in ellipses:
+				del a[i]
+				n-=1
+				continue
+			a[i]=a[i].lower()
+			if a[i] in accents: a[i]=nocents[accents.index(a[i])]
+			i+=1
+		return ''.join(a)
+	def __init__(self):
+		self.admin1dbf=None
+		self.root=None
+	def basic(self,param,name,gsg=None,isadmin1=False,isdisputed=False):
+		if param=='/': return name
+		ret=[]
+		if param==name+'/':
+			if isdisputed: ret.append(name+'/_disputed')
+			if isadmin1:
+				self.appendadmin1(ret,gsg,name+'/')
+		if ret==[]: ret=None
+		return ret
+	def handle(self,options,param):
+		if not '/' in param: return
+		parts=param.split('/')
+		admin1=parts[1]
+		if admin1=='_admin1':
+			options['admin1']=''
+			return
+		a1type=None
+		if '_' in admin1:
+			a=admin1.split('_')
+			admin1=a[0]
+			a1type=a[1]
+		dbf=self.admin1dbf
+		if not dbf: dbf=self.loadadmin1dbf()
+		gsg=options['gsg']
+		for i in range(dbf.numrecords):
+			r=dbf.records[i]
+			rgsg=r['sov3']+'.'+r['adm3']
+			if rgsg!=gsg: continue
+			name=r['name']
+			if not name: name='_blank_'+str(i)
+			if Options.collapsename(name)!=admin1: continue
+			t=r['type']
+			if a1type:
+				if Options.collapsename(t)!=a1type: continue
+			options['admin1']=gsg+'.'+name+'.'+t
+			options['countrymapdots_10m']=[]
+			break
+		else:
+			options['isnotfound']=True
+	def loadadmin1dbf(self):
+		dbf=Dbf(installfile=install.getinstallfile('admin1-nolakes.dbf',['10m']))
+		dbf.selectcfield('sov_a3','sov3')
+		dbf.selectcfield('adm0_a3','adm3')
+		dbf.selectcfield('name','name')
+		dbf.selectcfield('type_en','type')
+		dbf.loadrecords()
+		fixes=((3141,'MEX','MEX','','islaperez'), # 3139 for v4
+				(36,'MWI','MWI','Chitipa','Karonga'), # typo in v5
+				)
+		for f in fixes:
+			r=dbf.records[f[0]]
+			if f[1:4]!=(r['sov3'],r['adm3'],r['name']): raise ValueError
+			r['name']=f[4]
+		self.admin1dbf=dbf
+		return dbf
+	def loadroot(self):
+		root={}
+		for g in globals():
+			if g.startswith('_'): continue
+			if not g.endswith('_options'): continue
+			f=globals().get(g)
+			l=f('/')
+			if isinstance(l,str): l=(l,)
+			for n in l: root[n]=f
+		self.root=root
+		return root
+	def appendadmin1(self,dest,gsg,prefix):
+		dbf=self.admin1dbf
+		if not dbf: dbf=self.loadadmin1dbf()
+		isfound=False
+		shortnames={}
+		for i in range(dbf.numrecords):
+			r=dbf.records[i]
+			rgsg=r['sov3']+'.'+r['adm3']
+			if rgsg!=gsg: continue
+			name=r['name']
+			if not name: name='_blank_'+str(i)
+			shortnames[name]=shortnames.get(name,0)+1
+
+		for i in range(dbf.numrecords):
+			r=dbf.records[i]
+			rgsg=r['sov3']+'.'+r['adm3']
+			if rgsg!=gsg: continue
+			name=r['name']
+			if not name: name='_blank_'+str(i)
+			if shortnames[name]==1:
+				dest.append(prefix+Options.collapsename(name))
+			else:
+				t=r['type']
+				dest.append(prefix+Options.collapsename(name)+'_'+Options.collapsename(t))
+			isfound=True
+		if isfound: dest.append(prefix+'_admin1')
+	def listoptionpath2(self,matches):
+		more=[]
+		for n,f in matches:
+			ns=n+'/'
+			r=f(ns)
+			if not r: continue
+			more.append((ns,f))
+		for m in more: matches.append(m)
+		return matches
+	@staticmethod
+	def splitpath(path):
+		parts=path.split('/')
+		i=0
+		n=len(parts)-1
+		while i<n:
+			if parts[i]=='':
+				del parts[i]
+				n-=1
+				continue
+			i+=1
+		fpath='/'.join(parts)
+		return (fpath,parts[0])
+	def listoptionpath(self,path):
+		if not path.endswith('/'): return None
+		root=self.root
+		if not root: root=self.loadroot()
+		if path=='/':
+			dest=[]
+			for n in root: dest.append((n,root[n]))
+			return self.listoptionpath2(dest)
+		(fpath,basedir)=Options.splitpath(path)
+		f=root[basedir]
+		if not f: return None
+		a=f(fpath)
+		if not a: return None
+		ret=[]
+		for m in a: ret.append((m,f))
+		return ret
+	def getoptions(self,path):
+		if path.endswith('/'): return None
+		root=self.root
+		if not root: root=self.loadroot()
+		(fpath,basedir)=Options.splitpath(path)
+		f=root[basedir]
+		if not f: return None
+		return f(fpath)
+	def isvalidpath(self,path):
+		if self.listoptionpath(path): return True
+		opts=self.getoptions(path)
+		if not opts: return False
+		if 'isnotfound' in opts: return False
+		return True
+	def listall(self):
+		r=[]
+		a=self.listoptionpath('/')
+		while a!=[]:
+			n,f=a.pop()
+			if not n.endswith('/'): r.append(n)
+			else:
+				d=f(n)
+				for e in d: a.append((e,f))
+		return r
+
+options_global=Options()
+
+def maximap(output,overrides):
+	options={}
+	options['comment']=''
+	options['copyright']=''
+	options['width']=1000
+	options['height']=1000
+	options['bgcolor']=None
+	options['islakes']=True
+	options['spherem']='10m'
+	options['splitlimit']=4
+	options['labelfont']='14px sans'
+	options['gsg']=None
+	options['admin1']=None
+	options['hypso']=None
+	options['isautotrim']=True
+	allowedoverrides=('comment','copyright','width','height','bgcolor','islakes','spherem','splitlimit','labelfont','gsg','admin1')
+	publicfilter=('cmdline','title','comment','version','gsg','admin1')
+
+	if True:
+		more={}
+		for n in overrides:
+			if n.startswith('maximap_'): more[n[8:]]=overrides[n]
+		for n in more: overrides[n]=more[n]
+
+	if True:
+		pub={}
+		for n in overrides:
+			if n not in publicfilter: continue
+			pub[n]=overrides[n]
+		options['comment']=dicttostr('vars',pub)
+
+	for n in overrides:
+		 if n in allowedoverrides: options[n]=overrides[n]
+
+	width=options['width']
+	height=options['height']
+	splitlimit=options['splitlimit']
+
+	admin=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
+	admin.fixantarctica()
+	admin.fixrussia()
+	admin.setccwtypes()
+	if options['islakes']: admin.loadlakes()
+
+	if options['admin1']:
+		admin.loadadmin1()
+		mshape=admin.admin1.bynickname2(options['admin1'])
+	elif options['gsg']:
+		mshape=admin.bynickname[options['gsg']]
+	if not mshape: raise ValueError
+
+	az=AutoZoom()
+	az.addshape(mshape)
+	if True and options['isautotrim']:
+		bzc=az.getboxzoomcleave(width,splitlimit,True)
+		width=az.width
+		height=az.height
+	else:
+		bzc=az.getboxzoomcleave(width,splitlimit,False)
+	rotation=az.rotation
+	zoomscale=az.zoomfactor
+
+	mshape.setdraworder(-1,3)
+
+	if zoomscale==1:
+		if options['bgcolor']: print_rectangle_svg(output,0,0,width,height,options['bgcolor'],1.0)
+		print_roundwater_svg(output,width)
+	else:
+		print_rectwater_svg(output,width,height)
+
+	if True: # draw plain background countries
+		for one in admin.shapes:
+			one_sphere_print_svg(output,one,0,rotation,width,height,splitlimit,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
+					boxzoomcleave=bzc)
+		one_sphere_print_svg(output,mshape,3,rotation,width,height,splitlimit,cssfull=HIGH_LAND_SPHERE_CSS,
+				csspatch=PATCH_HIGH_LAND_SPHERE_CSS, boxzoomcleave=bzc)
+
+	if options['islakes']:
+		if isverbose_global: print('Drawing lakes sphere shapes',file=sys.stderr)
+		pluses=admin.getlakes()
+		pluses_sphere_print_svg(output,pluses,rotation,width,height,splitlimit, cssfull=WATER_SPHERE_CSS,csspatch=PATCH_WATER_SPHERE_CSS,
+				boxzoomcleave=bzc)
+		sasi=ShpAdminShapeIntersection()
+		sasi.addfromshapes((mshape,),3)
+		for l in admin.lakes.shapes:
+			sasi.setinside(l)
+		borderlakeshapes=sasi.exportlines()
+		for plus in borderlakeshapes:
+			if plus.type!=POLYLINE_TYPE_SHP: continue
+			oneplus_sphere_print_svg(output,plus,rotation,width,height,splitlimit,cssline=HIGH_BORDER_SPHERE_CSS,boxzoomcleave=bzc)
+
+	print_footer_svg(output)
+	if True:
+		o=Output()
+		ishypso=True if options['hypso'] else False
+		isgradients=True if zoomscale==1 else False
+		print_header_svg(o,width,height,output.csscounts,options['labelfont'],[options['copyright'],options['comment']],
+				ishypso=ishypso, isgradients=isgradients)
+		output.prepend(o)
 
 
-def indonesia_options():
-	options={'gsg':'IDN.IDN','isinsetleft':True,'lonlabel_lat':40,'latlabel_lon':175,'title':'Indonesia locator'}
+def indonesia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'indonesia','IDN.IDN',isadmin1=True)
+	options={'gsg':'IDN.IDN','isinsetleft':True,'lonlabel_lat':40,'latlabel_lon':175,}
+	options['locatormap_title']='Indonesia locator'
+	options['countrymap_title']='Indonesia countrymap'
+	options['countryzoom']=2
+
+	options_global.handle(options,param)
 	return options
 
-def malaysia_options():
-	options={'gsg':'MYS.MYS','isinsetleft':True,'lonlabel_lat':-17,'latlabel_lon':170,'title':'Malaysia locator'}
+def malaysia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'malaysia','MYS.MYS',isadmin1=True,isdisputed=True)
+	options={'gsg':'MYS.MYS','isinsetleft':True,'lonlabel_lat':-17,'latlabel_lon':170,}
+	options['locatormap_title']='Malaysia locator'
+	options['countrymap_title']='Malaysia countrymap'
+	options['countryzoom']=4
+	if param=='malaysia/_disputed':
+		options['disputed_border']=[ "PGA.PGA.Spratly Is.", ]
+	else: options_global.handle(options,param)
 	return options
 
-def chile_options():
-	options={'gsg':'CHL.CHL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-130,'title':'Chile locator'}
+def chile_options(param):
+	if param.endswith('/'): return options_global.basic(param,'chile','CHL.CHL',isadmin1=True,isdisputed=True)
+	options={'gsg':'CHL.CHL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-130,}
+	options['locatormap_title']='Chile locator'
+	options['countrymap_title']='Chile countrymap'
 	options['moredots_10m']=[(4,False,[2,3,4,5,6,7])]
+	options['countryzoom']=2.5
+	options['countrymapdots_10m']=[(4,False,[2,3,4,5,6,7])]
+	if param=='chile/_disputed':
+		options['moredots_10m']=[]
+		options['disputed']=[ "CHL.CHL.Atacama corridor", ]
+		options['disputed_border']=[ "SPI.SPI.Southern Patagonian Ice Field", ]
+	else: options_global.handle(options,param)
 	return options
 
-def bolivia_options():
-	options={'gsg':'BOL.BOL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Bolivia locator'}
-	options['borderlakes']=['Lago Titicaca']
+def bolivia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bolivia','BOL.BOL',isadmin1=True,isdisputed=True)
+	options={'gsg':'BOL.BOL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Bolivia locator'
+	options['countrymap_title']='Bolivia countrymap'
+#	options['borderlakes']=['Lago Titicaca']
+	options['countryzoom']=5
+	if param=='bolivia/_disputed':
+		options['disputed']=[ "CHL.CHL.Atacama corridor",]
+	else: options_global.handle(options,param)
 	return options
 
-def peru_options():
-	options={'gsg':'PER.PER','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Peru locator'}
-	options['borderlakes']=['Lago Titicaca']
+def peru_options(param):
+	if param.endswith('/'): return options_global.basic(param,'peru','PER.PER',isadmin1=True)
+	options={'gsg':'PER.PER','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Peru locator'
+	options['countrymap_title']='Peru countrymap'
+#	options['borderlakes']=['Lago Titicaca']
+	options['countryzoom']=4
+	options_global.handle(options,param)
 	return options
 
-def argentina_options():
-	options={'gsg':'ARG.ARG','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Argentina locator'}
+def argentina_options(param):
+	if param.endswith('/'): return options_global.basic(param,'argentina','ARG.ARG',isadmin1=True,isdisputed=True)
+	options={'gsg':'ARG.ARG','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Argentina locator'
+	options['countrymap_title']='Argentina countrymap'
+	options['countryzoom']=2.5
+	if param=='argentina/_disputed':
+		options['disputed']=[ "GB1.FLK.Falkland Is.", "GB1.SGS.S. Georgia", "GB1.SGS.S. Sandwich Is.", ]
+		options['disputed_border']=[ "SPI.SPI.Southern Patagonian Ice Field", ]
+	else: options_global.handle(options,param)
 	return options
 
-def dhekelia_options():
-	options={'gsg':'GB1.ESB','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Dhekelia locator'}
+def dhekelia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'dhekelia')
+	options={'gsg':'GB1.ESB','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Dhekelia locator'
+	options['countrymap_title']='Dhekelia countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
 	options['zoomscale']=16
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=50
+	options['countrylon']=33.4
 	return options
 
-def cyprus_options():
-	options={'gsg':'CYP.CYP','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Cyprus locator'}
+def cyprus_options(param):
+	if param.endswith('/'): return options_global.basic(param,'cyprus','CYP.CYP',isadmin1=True,isdisputed=True)
+	options={'gsg':'CYP.CYP','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Cyprus locator'
+	options['countrymap_title']='Cyprus countrymap'
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_10m']=[ (30,3,[2]) ]
+	options['countryzoom']=50
+	options['countrylon']=33.4
+	if param=='cyprus/_disputed':
+		options['moredots_10m']=[]
+		options['disputed']=['CYN.CYN.N. Cyprus', "CNM.CNM.Cyprus U.N. Buffer Zone", ]
+	else: options_global.handle(options,param)
 	return options
 
-def cyprus_disputed_options():
-	options=cyprus_options()
-	options['disputed']=['N. Cyprus']
-	return options
-
-def cyprusfull_options():
-	options={'gsgs':['_cyprusfull'],'isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Cyprus locator'}
+def cyprusfull_options(param): # this is a manufactured region for european union maps
+	if param.endswith('/'): return options_global.basic(param,'cyprusfull')
+	options={'gsgs':['cyprusfull'],'isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Cyprusfull locator'
+	options['countrymap_title']='Cyprusfull countrymap'
+	options['euromap_title']='Cyprus euromap'
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_50m']=[ (30,3,[0]) ]
-	options['euromapdots_50m']= [('_cyprusfull',24,False,[0]) ]
+	options['euromapdots_50m']= [('cyprusfull',24,False,[0]) ]
 #	options['ispartlabels']=True
 	return options
 
-def india_options():
-	options={'gsg':'IND.IND','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':55,'title':'India locator'}
+def india_options(param):
+	if param.endswith('/'): return options_global.basic(param,'india','IND.IND',isadmin1=True,isdisputed=True)
+	options={'gsg':'IND.IND','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':55,}
+	options['locatormap_title']='India locator'
+	options['countrymap_title']='India countrymap'
 	options['moredots_10m']=[ (4,False,[2,3,4,5,6,7,8,9,17]), (45,False,[21]) ]
 #	options['ispartlabels']=True
+	options['countryzoom']=3
+	options['countrymapdots_10m']=[ (4,False,[2,3,4,5,6,7,8,9,17]) ]
+	if param=='india/_disputed':
+		options['moredots_10m']=[]
+		options['iszoom']=True
+		options['zoomscale']=6.25
+		options['zoomlon']=79.5
+		options['zoomlat']=31.5
+		d=[]
+		db=[]
+		d.append('IND.IND.Arunachal Pradesh') # india and china
+		db.append('IND.IND.Tirpani Valleys') # india and china, border
+		db.append('IND.IND.Bara Hotii Valleys') # india and china, border
+		db.append('IND.IND.Demchok') # kashmir and china, border, redundant
+		db.append('IND.IND.Samdu Valleys') # india and china, border
+		d.append('IND.IND.Jammu and Kashmir') # india and pakistan and china, kashmir
+		d.append('CH1.CHN.Shaksam Valley') # india pakistan and china
+		d.append('CH1.CHN.Aksai Chin') # india and china
+		d.append("PAK.PAK.Gilgit-Baltistan") # pakistan india china, north of kashmir, aka Northern Areas
+		d.append('KAS.KAS.Siachen Glacier') # pakistan and india
+		db.append( "IND.IND.Near Om Parvat") # india nepal, border
+		db.append("PAK.PAK.Azad Kashmir") # pakistan india, border-ish
+		d.append("IND.IND.Junagadh and Manavadar") # pakistan india
+		options['disputed']=d
+		options['disputed_border']=db
+	elif param=='india/andamanandnicobar':
+		options_global.handle(options,param)
+		options['admin1dot']=90
+	elif param=='india/chandigarh':
+		options_global.handle(options,param)
+		options['admin1dot']=20
+	elif param=='india/dadraandnagarhavelianddamananddiu':
+		options_global.handle(options,param)
+		options['admin1dot']=40
+	elif param=='india/lakshadweep':
+		options_global.handle(options,param)
+		options['admin1dot']=60
+	elif param=='india/puducherry':
+		options_global.handle(options,param)
+		options['admin1dots']=15
+	else: options_global.handle(options,param)
 	return options
 
-def india_disputed_options():
-	options=india_options()
-	d=[]
-	db=[]
-	d.append('Arunachal Pradesh') # india and china
-	db.append('Tirpani Valleys') # india and china, border
-	db.append('Bara Hotii Valleys') # india and china, border
-	db.append('Demchok') # kashmir and china, border, redundant
-	db.append('Samdu Valleys') # india and china, border
-	d.append('Jammu and Kashmir') # india and pakistan and china, kashmir
-	d.append('Shaksam Valley') # india pakistan and china
-	d.append('Aksai Chin') # india and china
-	d.append('Northern Areas') # pakistan and india and china, north of kashmir
-	d.append('Siachen Glacier') # pakistan and india
-	options['disputed']=d
-	options['disputed_border']=db
-	return options
-
-def china_options():
-	options={'gsg':'CH1.CHN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':165,'title':'China locator'}
+def china_options(param):
+	if param.endswith('/'): return options_global.basic(param,'china','CH1.CHN',isadmin1=True,isdisputed=True)
+	options={'gsg':'CH1.CHN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':165,}
+	options['locatormap_title']='China locator'
+	options['countrymap_title']='China countrymap'
 	options['moredots_10m']=[ (4,False,[32,33,42,43,44,45,69]) ]
 #	options['ispartlabels']=True
+	options['countryzoom']=2
+	options['countrymapdots_10m']=[ (4,False,[32,33,42,43,44,45,69]) ]
+	if param=='china/_disputed':
+		options['moredots_10m']=[]
+		db=[]
+		d=[]
+		d.append('IND.IND.Arunachal Pradesh') # india and china
+		db.append('IND.IND.Tirpani Valleys') # india and china, border
+		db.append('IND.IND.Bara Hotii Valleys') # india and china, border
+		db.append('IND.IND.Demchok') # kashmir and china, border, redundant
+		db.append('IND.IND.Samdu Valleys') # india and china, border
+		d.append('IND.IND.Jammu and Kashmir') # india and pakistan and china, kashmir
+		d.append('CH1.CHN.Shaksam Valley') # india pakistan and china
+		d.append('CH1.CHN.Aksai Chin') # india and china
+		d.append("PAK.PAK.Gilgit-Baltistan") # pakistan india china, north of kashmir, aka Northern Areas
+		d.append("BTN.BTN.Bhutan (Chumbi salient)") # china bhutan
+		d.append("BTN.BTN.Bhutan (northwest valleys)") # china bhutan
+		db.append("CH1.CHN.Paracel Is.") # vietnam china taiwan, border
+		db.append("JPN.JPN.Pinnacle Is.") # china taiwan japan, border (senkaku)
+		db.append("PGA.PGA.Spratly Is.") # china malaysia philippines taiwan vietnam brunei, border
+		db.append("SCR.SCR.Scarborough Reef") # china philippines taiwan, border
+		d.append("TWN.TWN.Taiwan") # taiwan china
+		options['disputed']=d
+		options['disputed_border']=db
+	else: options_global.handle(options,param)
 	return options
 
-def china_disputed_options():
-	options=china_options()
-	db=[]
-	d=[]
-	d.append('Arunachal Pradesh') # india and china
-	db.append('Tirpani Valleys') # india and china, border
-	db.append('Bara Hotii Valleys') # india and china, border
-	db.append('Demchok') # kashmir and china, border, redundant
-	db.append('Samdu Valleys') # india and china, border
-	d.append('Jammu and Kashmir') # india and pakistan and china, kashmir
-	d.append('Shaksam Valley') # india pakistan and china
-	d.append('Aksai Chin') # india and china
-	d.append('Northern Areas') # pakistan and india and china, north of kashmir
-	options['disputed']=d
-	options['disputed_border']=db
-	return options
-
-def israel_options():
-	options={'gsg':'IS1.ISR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Israel locator'}
+def israel_options(param):
+	if param.endswith('/'): return options_global.basic(param,'israel','IS1.ISR',isdisputed=True)
+	options={'gsg':'IS1.ISR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Israel locator'
+	options['countrymap_title']='Israel countrymap'
 	options['issubland']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_10m']=[ (30,True,[0]) ]
-	options['borderlakes']=['Dead Sea','_deadseasouth']
+#	options['borderlakes']=['Dead Sea','_deadseasouth']
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed']=['IS1.ISR.Golan Heights', "IS1.PSX.West Bank", "IS1.ISR.Israel", ]
+		options['disputed_border']=[ "IS1.ISR.Shebaa Farms", "IS1.PSX.Gaza", "SYR.SYR.UNDOF Zone", "IS1.ISR.East Jerusalem", 
+				"IS1.ISR.No Man's Land (Fort Latrun)", "IS1.ISR.No Man's Land (Jerusalem)", "IS1.ISR.Mount Scopus", ]
 	return options
 
-def israel_disputed_options():
-	options=israel_options()
-	options['disputed']=['Golan Heights']
-	return options
-
-def palestine_options():
-	options={'gsg':'IS1.PSX','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Palestine locator'}
+def palestine_options(param):
+	if param.endswith('/'): return options_global.basic(param,'palestine','IS1.PSX',isdisputed=True)
+	options={'gsg':'IS1.PSX','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Palestine locator'
+	options['countrymap_title']='Palestine countrymap'
 	options['issubland']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_10m']=[ (30,True,[1]) ]
-	options['borderlakes']=['Dead Sea']
+#	options['borderlakes']=['Dead Sea']
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed']=[ "IS1.PSX.West Bank", ]
+		options['disputed_border']=[ "IS1.ISR.East Jerusalem", "IS1.ISR.No Man's Land (Fort Latrun)", "IS1.ISR.No Man's Land (Jerusalem)", 
+				"IS1.ISR.Mount Scopus", ]
 	return options
 
-def lebanon_options():
-	options={'gsg':'LBN.LBN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Lebanon locator'}
+def lebanon_options(param):
+	if param.endswith('/'): return options_global.basic(param,'lebanon','LBN.LBN',isadmin1=True,isdisputed=True)
+	options={'gsg':'LBN.LBN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Lebanon locator'
+	options['countrymap_title']='Lebanon countrymap'
 	options['issubland']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_10m']=[ (30,True,[0]) ]
+	options['countryzoom']=20
+	if param=='lebanon/_disputed':
+		options['moredots_10m']=[]
+		options['disputed']=['IS1.ISR.Golan Heights']
+		options['disputed_border']=[ "IS1.ISR.Shebaa Farms", ]
+	else: options_global.handle(options,param)
 	return options
 
-def lebanon_disputed_options():
-	options=lebanon_options()
-	options['disputed']=['Golan Heights']
+def ethiopia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ethiopia','ETH.ETH',isadmin1=True)
+	options={'gsg':'ETH.ETH','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':-25,}
+	options['locatormap_title']='Ethiopia locator'
+	options['countrymap_title']='Ethiopia countrymap'
+#	options['borderlakes']=['Lake Turkana']
+	options['countryzoom']=5
+	options_global.handle(options,param)
 	return options
 
-def ethiopia_options():
-	options={'gsg':'ETH.ETH','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':-25,'title':'Ethiopia locator'}
-	options['borderlakes']=['Lake Turkana']
+def southsudan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'southsudan','SDS.SDS',isadmin1=True,isdisputed=True)
+	options={'gsg':'SDS.SDS','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='South Sudan locator'
+	options['countrymap_title']='South Sudan countrymap'
+	options['countryzoom']=5
+	if param=='southsudan/_disputed':
+		options['isinsetleft']=True
+		options['iszoom']=True
+		options['zoomscale']=2.5
+		options['disputed']=['SDN.SDN.Abyei', 'KEN.KEN.Ilemi Triangle', "SDS.SDS.Ilemi Triange", ]
+	else: options_global.handle(options,param)
 	return options
 
-def southsudan_options():
-	options={'gsg':'SDS.SDS','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'South Sudan locator'}
+def somalia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'somalia','SOM.SOM',isadmin1=True,isdisputed=True)
+	options={'gsg':'SOM.SOM','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,}
+	options['locatormap_title']='Somalia locator'
+	options['countrymap_title']='Somalia countrymap'
+	options['countryzoom']=5
+	if param=='somalia/_disputed':
+		options['disputed']=['SOL.SOL.Somaliland']
+	else: options_global.handle(options,param)
 	return options
 
-def southsudan_disputed_options():
-	options=southsudan_options()
-	options['disputed']=['Abyei', 'Ilemi Triangle']
+def kenya_options(param):
+	if param.endswith('/'): return options_global.basic(param,'kenya','KEN.KEN',isadmin1=True,isdisputed=True)
+	options={'gsg':'KEN.KEN','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,}
+	options['locatormap_title']='Kenya locator'
+	options['countrymap_title']='Kenya countrymap'
+#	options['borderlakes']=['Lake Victoria','Lake Turkana']
+	options['countryzoom']=8
+	if param=='kenya/_disputed':
+		options['disputed']=['KEN.KEN.Ilemi Triangle', "SDS.SDS.Ilemi Triange", ]
+	else: options_global.handle(options,param)
 	return options
 
-def somalia_options():
-	options={'gsg':'SOM.SOM','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,'title':'Somalia locator'}
+def pakistan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'pakistan','PAK.PAK',isadmin1=True,isdisputed=True)
+	options={'gsg':'PAK.PAK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Pakistan locator'
+	options['countrymap_title']='Pakistan countrymap'
+	options['countryzoom']=5
+	if param=='pakistan/_disputed':
+		d=[]
+		d.append('IND.IND.Jammu and Kashmir') # india and pakistan and china, kashmir
+		d.append('CH1.CHN.Shaksam Valley') # india pakistan and china
+		d.append("PAK.PAK.Gilgit-Baltistan") # pakistan india china, north of kashmir, aka Northern Areas
+		d.append('KAS.KAS.Siachen Glacier') # pakistan and india
+		db.append("PAK.PAK.Azad Kashmir") # pakistan india, border-ish
+		d.append("IND.IND.Junagadh and Manavadar") # pakistan india
+		options['disputed']=d
+	else: options_global.handle(options,param)
 	return options
 
-def somalia_disputed_options():
-	options=somalia_options()
-	options['disputed']=['Somaliland']
-	return options
-
-def kenya_options():
-	options={'gsg':'KEN.KEN','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,'title':'Kenya locator'}
-	options['borderlakes']=['Lake Victoria','Lake Turkana']
-	return options
-
-def kenya_disputed_options():
-	options=kenya_options()
-	options['disputed']=['Ilemi Triangle']
-	return options
-
-def pakistan_options():
-	options={'gsg':'PAK.PAK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Pakistan locator'}
-	return options
-
-def pakistan_disputed_options():
-	options=pakistan_options()
-	d=[]
-	d.append('Jammu and Kashmir') # india and pakistan and china, kashmir
-	d.append('Shaksam Valley') # india pakistan and china
-	d.append('Northern Areas') # pakistan and india and china, north of kashmir
-	d.append('Siachen Glacier') # pakistan and india
-	options['disputed']=d
-	return options
-
-def malawi_options():
-	options={'gsg':'MWI.MWI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Malawi locator'}
+def malawi_options(param):
+	if param.endswith('/'): return options_global.basic(param,'malawi','MWI.MWI',isadmin1=True)
+	options={'gsg':'MWI.MWI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Malawi locator'
+	options['countrymap_title']='Malawi countrymap'
 	options['iszoom']=False
-	options['borderlakes']=['Lake Malawi']
+#	options['borderlakes']=['Lake Malawi']
+	options['countryzoom']=8
+	options_global.handle(options,param)
 	return options
 
-def unitedrepublicoftanzania_options():
-	options={'gsg':'TZA.TZA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'United Republic of Tanzania locator'}
-	options['borderlakes']=['Lake Victoria','Lake Malawi']
+def unitedrepublicoftanzania_options(param):
+	if param.endswith('/'): return options_global.basic(param,'unitedrepublicoftanzania')
+	options={'gsg':'TZA.TZA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='United Republic of Tanzania locator'
+	options['countrymap_title']='United Republic of Tanzania countrymap'
+#	options['borderlakes']=['Lake Victoria','Lake Malawi']
+	options['countryzoom']=8
 	return options
 
-def syria_options():
-	options={'gsg':'SYR.SYR','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,'title':'Syria locator'}
+def syria_options(param):
+	if param.endswith('/'): return options_global.basic(param,'syria','SYR.SYR',isdisputed=True)
+	options={'gsg':'SYR.SYR','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Syria locator'
+	options['countrymap_title']='Syria countrymap'
+	options['countryzoom']=10
+	if 'disputed' in param:
+		options['disputed_border']=[ "IS1.ISR.Shebaa Farms", "SYR.SYR.UNDOF Zone", ]
 	return options
 
-def somaliland_options():
-	options={'gsg':'SOL.SOL','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,'title':'Somaliland locator'}
+def somaliland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'somaliland')
+	options={'gsg':'SOL.SOL','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Somaliland locator'
+	options['countrymap_title']='Somaliland countrymap'
+	options['countryzoom']=10
 	return options
 
-def france_options():
-	options={'gsg':'FR1.FRA','isinsetleft':True,'lonlabel_lat':21,'latlabel_lon':-30,'title':'France locator'}
+def france_options(param):
+	if param.endswith('/'): return options_global.basic(param,'france','FR1.FRA',isdisputed=True)
+	options={'gsg':'FR1.FRA','isinsetleft':True,'lonlabel_lat':21,'latlabel_lon':-30,}
+	options['locatormap_title']='France locator'
+	options['countrymap_title']='France countrymap'
+	options['euromap_title']='France euromap'
 	options['iszoom']=True
 	options['issubland']=False
 	europarts_10m=[1,11,12,13,14,15,16,17,18,21]
 	options['tripelboxes']=[[0],[3,4,5,6,7,19,20],[8,9,10],europarts_10m]
 	options['centerindices_10m']=europarts_10m
+	options['countryzoom']=8
 
 #	options['isfullpartlabels']=True
+	if 'disputed' in param:
+		options={'gsg':'FR1.FRA','isinsetleft':True,'lonlabel_lat':21,'latlabel_lon':-30,'title':'France locator'}
+		europarts_10m=[1,11,12,13,14,15,16,17,18,21]
+		options['tripelboxes']=[[0],[3,4,5,6,7,19,20],[8,9,10],europarts_10m]
+		options['centerindices_10m']=[0]
+		options['iszoom']=True
+		options['iszoom34']=True
+		options['zoomscale']=4
+		options['disputed']=['FR1.FRA.Lawa Headwaters']
+		options['disputed_border']=[ "FR1.ATF.Bassas da India", "FR1.ATF.Europa Island", "FR1.ATF.Glorioso Is.", 
+				"FR1.ATF.Juan De Nova I.", "FR1.ATF.Tromelin I.", "FR1.FRA.Mayotte", "FR1.NCL.Matthew and Hunter Is.", ]
 	return options
 
-def france_disputed_options():
-	options={'gsg':'FR1.FRA','isinsetleft':True,'lonlabel_lat':21,'latlabel_lon':-30,'title':'France locator'}
-	options['disputed']=['Lawa Headwaters']
-	europarts_10m=[1,11,12,13,14,15,16,17,18,21]
-	options['tripelboxes']=[[0],[3,4,5,6,7,19,20],[8,9,10],europarts_10m]
-	options['centerindices_10m']=[0]
-	options['iszoom']=True
-	options['iszoom34']=True
-	options['zoomscale']=4
+def suriname_options(param):
+	if param.endswith('/'): return options_global.basic(param,'suriname','SUR.SUR',isdisputed=True)
+	options={'gsg':'SUR.SUR','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Suriname locator'
+	options['countrymap_title']='Suriname countrymap'
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed']=['FR1.FRA.Lawa Headwaters','GUY.GUY.Courantyne Headwaters']
 	return options
 
-def suriname_options():
-	options={'gsg':'SUR.SUR','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Suriname locator'}
+def guyana_options(param):
+	if param.endswith('/'): return options_global.basic(param,'guyana','GUY.GUY',isdisputed=True)
+	options={'gsg':'GUY.GUY','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Guyana locator'
+	options['countrymap_title']='Guyana countrymap'
+	options['countryzoom']=10
+	if 'disputed' in param:
+		options['disputed']=['GUY.GUY.Courantyne Headwaters', "GUY.GUY.West of Essequibo River", ]
 	return options
 
-def suriname_disputed_options():
-	options=suriname_options()
-	options['disputed']=['Lawa Headwaters','Courantyne Headwaters']
+def southkorea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'southkorea','KOR.KOR',isdisputed=True)
+	options={'gsg':'KOR.KOR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='South Korea locator'
+	options['countrymap_title']='South Korea countrymap'
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed_border']=[ "KOR.KOR.Dokdo", "KOR.KOR.Korean Demilitarized Zone (south)", 
+				"PRK.PRK.Korean Demilitarized Zone (north)", "KOR.KOR.Korean islands under UN jurisdiction", ]
 	return options
 
-def guyana_options():
-	options={'gsg':'GUY.GUY','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Guyana locator'}
+def northkorea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'northkorea','PRK.PRK',isdisputed=True)
+	options={'gsg':'PRK.PRK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='North Korea locator'
+	options['countrymap_title']='North Korea countrymap'
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed_border']=[ "KOR.KOR.Korean Demilitarized Zone (south)", "PRK.PRK.Korean Demilitarized Zone (north)", 
+				"KOR.KOR.Korean islands under UN jurisdiction", ]
 	return options
 
-def guyana_disputed_options():
-	options=guyana_options()
-	options['disputed']=['Courantyne Headwaters']
+def morocco_options(param):
+	if param.endswith('/'): return options_global.basic(param,'morocco','MAR.MAR',isdisputed=True)
+	options={'gsg':'MAR.MAR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Morocco locator'
+	options['countrymap_title']='Morocco countrymap'
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['disputed']=['MAR.MAR.W. Sahara']
+	#	"SAH.SAH.W. Sahara", # morocco wsahara, this is usa's version of wsahara
+		options['disputed_border']=[ "ESP.ESP.Ceuta", "ESP.ESP.Isla del Perejil", "ESP.ESP.Islas Chafarinas", 
+				"ESP.ESP.Melilla", "ESP.ESP.Penon de Alhucemas", "ESP.ESP.Peñón de Vélez de la Gomera", ]
 	return options
 
-def southkorea_options():
-	options={'gsg':'KOR.KOR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'South Korea locator'}
+def westernsahara_options(param):
+	if param.endswith('/'): return options_global.basic(param,'westernsahara','SAH.SAH',isdisputed=True)
+	options={'gsg':'SAH.SAH','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Western Sahara locator'
+	options['countrymap_title']='Western Sahara countrymap'
+	options['countryzoom']=10
+	if 'disputed' in param:
+		options['disputed']=['MAR.MAR.W. Sahara']
+	#	"SAH.SAH.W. Sahara", # morocco wsahara, this is usa's version of wsahara
 	return options
 
-def northkorea_options():
-	options={'gsg':'PRK.PRK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'North Korea locator'}
-	return options
-
-def morocco_options():
-	options={'gsg':'MAR.MAR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Morocco locator'}
-	return options
-
-def morocco_disputed_options():
-	options=morocco_options()
-	options['disputed']=['W. Sahara']
-	return options
-
-def westernsahara_options():
-	options={'gsg':'SAH.SAH','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Western Sahara locator'}
-	return options
-
-def westernsahara_disputed_options():
-	options=westernsahara_options()
-	options['disputed']=['W. Sahara']
-	return options
-
-def costarica_options():
-	options={'gsg':'CRI.CRI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Costa Rica locator'}
+def costarica_options(param):
+	if param.endswith('/'): return options_global.basic(param,'costarica')
+	options={'gsg':'CRI.CRI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Costa Rica locator'
+	options['countrymap_title']='Costa Rica countrymap'
 	options['moredots_10m']=[ (4,False,[2]) ]
+	options['countryzoom']=16
+	options['countrymapdots_10m']=[ (4,False,[2]) ]
 	return options
 
-def nicaragua_options():
-	options={'gsg':'NIC.NIC','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Nicaragua locator'}
+def nicaragua_options(param):
+	if param.endswith('/'): return options_global.basic(param,'nicaragua','NIC.NIC',isdisputed=True)
+	options={'gsg':'NIC.NIC','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Nicaragua locator'
+	options['countrymap_title']='Nicaragua countrymap'
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed_border']=[ "BJN.BJN.Bajo Nuevo Bank (Petrel Is.)", "SER.SER.Serranilla Bank", ]
 	return options
 
-def republicofthecongo_options():
-	options={'gsg':'COG.COG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Republic of the Congo locator'}
+def republicofthecongo_options(param):
+	if param.endswith('/'): return options_global.basic(param,'republicofthecongo')
+	options={'gsg':'COG.COG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Republic of the Congo locator'
+	options['countrymap_title']='Republic of the Congo countrymap'
+	options['countryzoom']=8
 	return options
 
-def democraticrepublicofthecongo_options():
-	options={'gsg':'COD.COD','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Democratic Republic of the Congo locator'}
-	options['borderlakes']=['Lac Moeru','Lake Kivu','Lake Edward','Lake Albert']
+def democraticrepublicofthecongo_options(param):
+	if param.endswith('/'): return options_global.basic(param,'democraticrepublicofthecongo')
+	options={'gsg':'COD.COD','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Democratic Republic of the Congo locator'
+	options['countrymap_title']='Democratic Republic of the Congo countrymap'
+#	options['borderlakes']=['Lac Moeru','Lake Kivu','Lake Edward','Lake Albert']
+	options['countryzoom']=5
 	return options
 
-def bhutan_options():
-	options={'gsg':'BTN.BTN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Bhutan locator'}
+def bhutan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bhutan','BTN.BTN',isdisputed=True)
+	options={'gsg':'BTN.BTN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Bhutan locator'
+	options['countrymap_title']='Bhutan countrymap'
 	options['iszoom']=True
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['disputed']=[ "BTN.BTN.Bhutan (Chumbi salient)", "BTN.BTN.Bhutan (northwest valleys)", ]
 	return options
 
-def ukraine_options():
-	options={'gsg':'UKR.UKR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Ukraine locator'}
+def ukraine_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ukraine','UKR.UKR',isdisputed=True)
+	options={'gsg':'UKR.UKR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Ukraine locator'
+	options['countrymap_title']='Ukraine countrymap'
+	options['countryzoom']=8
+	if 'disputed' in param:
+		options['disputed']=['RUS.RUS.Crimea','UKR.UKR.Donbass']
+		options['iszoom']=True
+		options['iszoom34']=True
 	return options
 
-def ukraine_disputed_options():
-	options=ukraine_options()
-	options['disputed']=['Crimea','Donbass']
-	options['iszoom']=True
-	options['iszoom34']=True
+def belarus_options(param):
+	if param.endswith('/'): return options_global.basic(param,'belarus')
+	options={'gsg':'BLR.BLR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Belarus locator'
+	options['countrymap_title']='Belarus countrymap'
+	options['countryzoom']=16
 	return options
 
-def belarus_options():
-	options={'gsg':'BLR.BLR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Belarus locator'}
+def namibia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'namibia')
+	options={'gsg':'NAM.NAM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Namibia locator'
+	options['countrymap_title']='Namibia countrymap'
+	options['countryzoom']=8
 	return options
 
-def namibia_options():
-	options={'gsg':'NAM.NAM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Namibia locator'}
-	return options
-
-def southafrica_options():
-	options={'gsg':'ZAF.ZAF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'South Africa locator'}
+def southafrica_options(param):
+	if param.endswith('/'): return options_global.basic(param,'southafrica')
+	options={'gsg':'ZAF.ZAF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='South Africa locator'
+	options['countrymap_title']='South Africa countrymap'
 	options['moredots_10m']=[ (4,True,[2,3]) ]
+	options['countryzoom']=4
+	options['countrymapdots_10m']=[ (12,True,[2,3]) ]
 	return options
 
-def saintmartin_options():
-	options={'gsg':'FR1.MAF','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Saint Martin locator'}
+def saintmartin_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saintmartin')
+	options={'gsg':'FR1.MAF','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Martin locator'
+	options['countrymap_title']='Saint Martin countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=16
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=64
+#	options['countrymapdots_10m']=[ (20,3,[0]) ]
 	return options
 
-def sintmaarten_options():
-	options={'gsg':'NL1.SXM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Sint Maarten locator'}
+def sintmaarten_options(param):
+	if param.endswith('/'): return options_global.basic(param,'sintmaarten')
+	options={'gsg':'NL1.SXM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Sint Maarten locator'
+	options['countrymap_title']='Sint Maarten countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=16
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=64
 	return options
 
-def oman_options():
-	options={'gsg':'OMN.OMN','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,'title':'Oman locator'}
+def oman_options(param):
+	if param.endswith('/'): return options_global.basic(param,'oman')
+	options={'gsg':'OMN.OMN','isinsetleft':False,'lonlabel_lat':-10,'latlabel_lon':50,}
+	options['locatormap_title']='Oman locator'
+	options['countrymap_title']='Oman countrymap'
 #	options['ispartlabels']=True
+	options['countryzoom']=10
 	return options
 
-def uzbekistan_options():
-	options={'gsg':'UZB.UZB','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,'title':'Uzbekistan locator'}
-	options['borderlakes']=['Aral Sea','Sarygamysh Köli']
+def uzbekistan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'uzbekistan')
+	options={'gsg':'UZB.UZB','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Uzbekistan locator'
+	options['countrymap_title']='Uzbekistan countrymap'
+#	options['borderlakes']=['Aral Sea','Sarygamysh Köli']
+	options['countryzoom']=8
 	return options
 
-def kazakhstan_options():
-	options={'gsg':'KAZ.KAZ','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,'title':'Kazakhstan locator'}
+def kazakhstan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'kazakhstan')
+	options={'gsg':'KA1.KAZ','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Kazakhstan locator'
+	options['countrymap_title']='Kazakhstan countrymap'
+	options['countryzoom']=4
+#	"KA1.KAB.Baykonur", # kazakhstan russia, dispute appears over?
 	return options
 
-def tajikistan_options():
-	options={'gsg':'TJK.TJK','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,'title':'Tajikistan locator'}
+def tajikistan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'tajikistan')
+	options={'gsg':'TJK.TJK','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Tajikistan locator'
+	options['countrymap_title']='Tajikistan countrymap'
+	options['countryzoom']=16
 	return options
 
-def lithuania_options():
-	options={'gsg':'LTU.LTU','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Lithuania locator'}
+def lithuania_options(param):
+	if param.endswith('/'): return options_global.basic(param,'lithuania')
+	options={'gsg':'LTU.LTU','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Lithuania locator'
+	options['countrymap_title']='Lithuania countrymap'
+	options['euromap_title']='Lithuania euromap'
 	options['iszoom']=True
+	options['countryzoom']=25
 	return options
 
-def brazil_options():
-	options={'gsg':'BRA.BRA','isinsetleft':False,'lonlabel_lat':21,'latlabel_lon':-30,'title':'Brazil locator'}
+def brazil_options(param):
+	if param.endswith('/'): return options_global.basic(param,'brazil','BRA.BRA',isdisputed=True)
+	options={'gsg':'BRA.BRA','isinsetleft':False,'lonlabel_lat':21,'latlabel_lon':-30,}
+	options['locatormap_title']='Brazil locator'
+	options['countrymap_title']='Brazil countrymap'
 	options['moredots_10m']=[ (6,False,[27,28,36]) ]
-	options['borderlakes']=['Itaipú Reservoir']
+#	options['borderlakes']=['Itaipú Reservoir']
+	options['countryzoom']=2.5
+	options['countrymapdots_10m']=[ (6,False,[27,28,36]) ]
+	if 'disputed' in param:
+		options['disputed_border']=[ "BRI.BRI.Brazilian Island", "BRA.BRA.Corner of Artigas", ]
 	return options
 
-def uruguay_options():
-	options={'gsg':'URY.URY','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Uruguay locator'}
+def uruguay_options(param):
+	if param.endswith('/'): return options_global.basic(param,'uruguay','URY.URY',isdisputed=True)
+	options={'gsg':'URY.URY','isinsetleft':False,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Uruguay locator'
+	options['countrymap_title']='Uruguay countrymap'
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed_border']=[ "BRI.BRI.Brazilian Island", "BRA.BRA.Corner of Artigas", ]
 	return options
 
-def mongolia_options():
-	options={'gsg':'MNG.MNG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Mongolia locator'}
+def mongolia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'mongolia')
+	options={'gsg':'MNG.MNG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Mongolia locator'
+	options['countrymap_title']='Mongolia countrymap'
+	options['countryzoom']=4
 	return options
 
-def russia_options():
-	options={'gsg':'RUS.RUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':179,'title':'Russia locator'}
+def russia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'russia','RUS.RUS',isdisputed=True)
+	options={'gsg':'RUS.RUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':179,}
+	options['locatormap_title']='Russia locator'
+	options['countrymap_title']='Russia countrymap'
 	options['lon']=109
 	options['moredots_10m']=[ (4,False,[137]) ]
 	options['tripelboxes_10m']=[ [0,1,2], [70] ]
 #	options['ispartlabels']=True
-	options['borderlakes']=['Pskoyskoye Ozero', 'Lake Peipus','Aral Sea']
+#	options['borderlakes']=['Pskoyskoye Ozero', 'Lake Peipus','Aral Sea']
+	options['countryzoom']=1.4
+	options['countrylon']=100
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed']=['RUS.RUS.Crimea']
+	#	"KA1.KAB.Baykonur", # kazakhstan russia, dispute appears over?
+		options['disputed_border']=['RUS.RUS.Kuril Is.']
 	return options
 
-def russia_disputed_options():
-	options=russia_options()
-	options['disputed']=['Crimea']
-	options['disputed_border']=['Kuril Is.']
+def czechia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'czechia')
+	options={'gsg':'CZE.CZE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Czechia locator'
+	options['countrymap_title']='Czechia countrymap'
+	options['euromap_title']='Czechia euromap'
+	options['countryzoom']=20
 	return options
 
-def czechia_options():
-	options={'gsg':'CZE.CZE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Czechia locator'}
+def germany_options(param):
+	if param.endswith('/'): return options_global.basic(param,'germany')
+	options={'gsg':'DEU.DEU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Germany locator'
+	options['countrymap_title']='Germany countrymap'
+	options['euromap_title']='Germany euromap'
+	options['countryzoom']=12.5
 	return options
 
-def germany_options():
-	options={'gsg':'DEU.DEU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Germany locator'}
-	return options
-
-def estonia_options():
-	options={'gsg':'EST.EST','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Estonia locator'}
+def estonia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'estonia')
+	options={'gsg':'EST.EST','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Estonia locator'
+	options['countrymap_title']='Estonia countrymap'
+	options['euromap_title']='Estonia euromap'
 	options['iszoom']=True
 	options['centerdot']=(25,True)
-	options['borderlakes']=['Pskoyskoye Ozero', 'Lake Peipus']
+#	options['borderlakes']=['Pskoyskoye Ozero', 'Lake Peipus']
+	options['countryzoom']=25
 	return options
 
-def latvia_options():
-	options={'gsg':'LVA.LVA','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Latvia locator'}
+def latvia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'latvia')
+	options={'gsg':'LVA.LVA','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Latvia locator'
+	options['countrymap_title']='Latvia countrymap'
+	options['euromap_title']='Latvia euromap'
 	options['iszoom']=True
+	options['countryzoom']=20
 	return options
 
-def norway_options():
-	options={'gsg':'NOR.NOR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Norway locator'}
+def norway_options(param):
+	if param.endswith('/'): return options_global.basic(param,'norway')
+	options={'gsg':'NOR.NOR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Norway locator'
+	options['countrymap_title']='Norway countrymap'
 	options['centerindices_10m']=[0,96]
 	options['moredots_10m']=[ (4,False,[74,97]) ]
 	options['zoomdots_10m']=[ (10,False,[74,97]) ]
 	options['iszoom']=True
 	options['tripelboxes_10m']=[ [0,1,2,86] ]
+	options['countryzoom']=4
+	options['countrymapdots_10m']=[ (10,False,[74]) ]
 	return options
 
-def sweden_options():
-	options={'gsg':'SWE.SWE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Sweden locator'}
+def sweden_options(param):
+	if param.endswith('/'): return options_global.basic(param,'sweden')
+	options={'gsg':'SWE.SWE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Sweden locator'
+	options['countrymap_title']='Sweden countrymap'
+	options['euromap_title']='Sweden euromap'
+	options['countryzoom']=6.25
 	return options
 
-def finland_options():
-	options={'gsg':'FI1.FIN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Finland locator'}
+def finland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'finland')
+	options={'gsg':'FI1.FIN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Finland locator'
+	options['countrymap_title']='Finland countrymap'
+	options['euromap_title']='Finland euromap'
+	options['countryzoom']=8
 	return options
 
-def vietnam_options():
-	options={'gsg':'VNM.VNM','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':165,'title':'Vietnam locator'}
+def vietnam_options(param):
+	if param.endswith('/'): return options_global.basic(param,'vietnam','VNM.VNM',isdisputed=True)
+	options={'gsg':'VNM.VNM','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':165,}
+	options['locatormap_title']='Vietnam locator'
+	options['countrymap_title']='Vietnam countrymap'
+	options['countryzoom']=6.25
+	if 'disputed' in param:
+		options['disputed_border']=[ "CH1.CHN.Paracel Is.", "PGA.PGA.Spratly Is.", ]
 	return options
 
-def cambodia_options():
-	options={'gsg':'KHM.KHM','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':160,'title':'Cambodia locator'}
+def cambodia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'cambodia')
+	options={'gsg':'KHM.KHM','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':160,}
+	options['locatormap_title']='Cambodia locator'
+	options['countrymap_title']='Cambodia countrymap'
+	options['countryzoom']=16
 	return options
 
-def luxembourg_options():
-	options={'gsg':'LUX.LUX','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Luxembourg locator'}
+def luxembourg_options(param):
+	if param.endswith('/'): return options_global.basic(param,'luxembourg')
+	options={'gsg':'LUX.LUX','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Luxembourg locator'
+	options['countrymap_title']='Luxembourg countrymap'
+	options['euromap_title']='Luxembourg euromap'
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['moredots_10m']=[ (30,True,[0]) ]
 	options['euromapdots_50m']= [('LUX.LUX',24,False,[0]) ]
+	options['countryzoom']=80
 	return options
 
-def unitedarabemirates_options():
-	options={'gsg':'ARE.ARE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'United Arab Emirates locator'}
+def unitedarabemirates_options(param):
+	if param.endswith('/'): return options_global.basic(param,'unitedarabemirates','ARE.ARE',isdisputed=True)
+	options={'gsg':'ARE.ARE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='United Arab Emirates locator'
+	options['countrymap_title']='United Arab Emirates countrymap'
 	options['iszoom']=True
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['disputed_border']=[ "IRN.IRN.Abu Musa I.", ]
 	return options
 
-def belgium_options():
-	options={'gsg':'BEL.BEL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Belgium locator'}
+def belgium_options(param):
+	if param.endswith('/'): return options_global.basic(param,'belgium')
+	options={'gsg':'BEL.BEL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Belgium locator'
+	options['countrymap_title']='Belgium countrymap'
+	options['euromap_title']='Belgium euromap'
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_10m']=[ (25,True,[0]) ]
+	options['countryzoom']=40
 	return options
 
-def georgia_options():
-	options={'gsg':'GEO.GEO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,'title':'Georgia locator'}
+def georgia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'georgia','GEO.GEO',isdisputed=True)
+	options={'gsg':'GEO.GEO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,}
+	options['locatormap_title']='Georgia locator'
+	options['countrymap_title']='Georgia countrymap'
 	options['iszoom']=True
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed']=['GEO.B35.Abkhazia','GEO.B37.South Ossetia']
 	return options
 
-def georgia_disputed_options():
-	options=georgia_options()
-	options['disputed']=['Abkhazia','South Ossetia']
-	return options
-
-def macedonia_options():
-	options={'gsg':'MKD.MKD','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Macedonia locator'}
+def northmacedonia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'macedonia')
+	options={'gsg':'MKD.MKD','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Macedonia locator'
+	options['countrymap_title']='Macedonia countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=32
 	return options
 
-def albania_options():
-	options={'gsg':'ALB.ALB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Albania locator'}
+def albania_options(param):
+	if param.endswith('/'): return options_global.basic(param,'albania')
+	options={'gsg':'ALB.ALB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Albania locator'
+	options['countrymap_title']='Albania countrymap'
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=32
 	return options
 
-def azerbaijan_options():
-	options={'gsg':'AZE.AZE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Azerbaijan locator'}
+def azerbaijan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'azerbaijan','AZE.AZE',isdisputed=True)
+	options={'gsg':'AZE.AZE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Azerbaijan locator'
+	options['countrymap_title']='Azerbaijan countrymap'
 	options['iszoom']=True
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['disputed']=[ "AZE.AZE.Artsakh", ]
 	return options
 
-def azerbaijan_disputed_options():
-	options=azerbaijan_options()
-	options['disputed']=['Nagorno-Karabakh']
-	return options
-
-def kosovo_options():
-	options={'gsg':'KOS.KOS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Kosovo locator'}
+def kosovo_options(param):
+	if param.endswith('/'): return options_global.basic(param,'kosovo','KOS.KOS',isdisputed=True)
+	options={'gsg':'KOS.KOS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Kosovo locator'
+	options['countrymap_title']='Kosovo countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=32
+	if 'disputed' in param:
+		options['disputed']=["KOS.KOS.Kosovo", ]
 	return options
 
-def turkey_options():
-	options={'gsg':'TUR.TUR','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Turkey locator'}
+def turkey_options(param):
+	if param.endswith('/'): return options_global.basic(param,'turkey')
+	options={'gsg':'TUR.TUR','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Turkey locator'
+	options['countrymap_title']='Turkey countrymap'
+	options['countryzoom']=5
 	return options
 
-def spain_options():
-	options={'gsg':'ESP.ESP','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Spain locator'}
+def spain_options(param):
+	if param.endswith('/'): return options_global.basic(param,'spain','ESP.ESP',isdisputed=True)
+	options={'gsg':'ESP.ESP','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Spain locator'
+	options['countrymap_title']='Spain countrymap'
+	options['euromap_title']='Spain euromap'
 	options['moredots_10m']=[(10,False,[1]),(24,False,[5])]
 	options['euromapdots_50m']=[('ESP.ESP',56,False,[5])]
 #	options['ispartlabels']=True
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "ESP.ESP.Ceuta", "ESP.ESP.Isla del Perejil", "ESP.ESP.Islas Chafarinas", 
+				"ESP.ESP.Melilla", "ESP.ESP.Olivenza", "ESP.ESP.Penon de Alhucemas", "ESP.ESP.Peñón de Vélez de la Gomera", 
+				"GB1.GIB.Gibraltar", ]
 	return options
 
-def laos_options():
-	options={'gsg':'LAO.LAO','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':165,'title':'Laos locator'}
+def laos_options(param):
+	if param.endswith('/'): return options_global.basic(param,'laos')
+	options={'gsg':'LAO.LAO','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':165,}
+	options['locatormap_title']='Laos locator'
+	options['countrymap_title']='Laos countrymap'
 	options['iszoom']=False
 #	options['halflightgsgs']=['VNM.VNM','KHM.KHM','MMR.MMR','THA.THA']
+	options['countryzoom']=10
 	return options
 
-def kyrgyzstan_options():
-	options={'gsg':'KGZ.KGZ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Kyrgyzstan locator'}
+def kyrgyzstan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'kyrgyzstan')
+	options={'gsg':'KGZ.KGZ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Kyrgyzstan locator'
+	options['countrymap_title']='Kyrgyzstan countrymap'
+	options['countryzoom']=10
 	return options
 
-def armenia_options():
-	options={'gsg':'ARM.ARM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,'title':'Armenia locator'}
+def armenia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'armenia')
+	options={'gsg':'ARM.ARM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,}
+	options['locatormap_title']='Armenia locator'
+	options['countrymap_title']='Armenia countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
+	options['countryzoom']=16
 	return options
 
-def denmark_options():
-	options={'gsg':'DN1.DNK','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Denmark locator'}
+def denmark_options(param):
+	if param.endswith('/'): return options_global.basic(param,'denmark','DN1.DNK',isdisputed=True)
+	options={'gsg':'DN1.DNK','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Denmark locator'
+	options['countrymap_title']='Denmark countrymap'
+	options['euromap_title']='Denmark euromap'
 	options['moredots_10m']=[ (4,False,[6]),(25,True,[0]) ]
 	options['iszoom']=True
 	options['zoomscale']=4
 #	options['ispartlabels']=True
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "DN1.GRL.Hans Island", ]
 	return options
 
-def libya_options():
-	options={'gsg':'LBY.LBY','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Libya locator'}
+def libya_options(param):
+	if param.endswith('/'): return options_global.basic(param,'libya')
+	options={'gsg':'LBY.LBY','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Libya locator'
+	options['countrymap_title']='Libya countrymap'
+	options['countryzoom']=5
 	return options
 
-def tunisia_options():
-	options={'gsg':'TUN.TUN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Tunisia locator'}
+def tunisia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'tunisia')
+	options={'gsg':'TUN.TUN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Tunisia locator'
+	options['countrymap_title']='Tunisia countrymap'
+	options['countryzoom']=10
 	return options
 
-def romania_options():
-	options={'gsg':'ROU.ROU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Romania locator'}
+def romania_options(param):
+	if param.endswith('/'): return options_global.basic(param,'romania')
+	options={'gsg':'ROU.ROU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Romania locator'
+	options['countrymap_title']='Romania countrymap'
+	options['euromap_title']='Romania euromap'
+	options['countryzoom']=10
 	return options
 
-def hungary_options():
-	options={'gsg':'HUN.HUN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Hungary locator'}
+def hungary_options(param):
+	if param.endswith('/'): return options_global.basic(param,'hungary')
+	options={'gsg':'HUN.HUN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Hungary locator'
+	options['countrymap_title']='Hungary countrymap'
+	options['euromap_title']='Hungary euromap'
 	options['iszoom']=True
+	options['countryzoom']=16
 	return options
 
-def slovakia_options():
-	options={'gsg':'SVK.SVK','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Slovakia locator'}
+def slovakia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'slovakia')
+	options={'gsg':'SVK.SVK','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Slovakia locator'
+	options['countrymap_title']='Slovakia countrymap'
+	options['euromap_title']='Slovakia euromap'
 	options['iszoom']=True
+	options['countryzoom']=20
 	return options
 
-def poland_options():
-	options={'gsg':'POL.POL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Poland locator'}
+def poland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'poland')
+	options={'gsg':'POL.POL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Poland locator'
+	options['countrymap_title']='Poland countrymap'
+	options['euromap_title']='Poland euromap'
+	options['countryzoom']=10
 	return options
 
-def ireland_options():
-	options={'gsg':'IRL.IRL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Ireland locator'}
+def ireland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ireland','IRL.IRL',isadmin1=True)
+	options={'gsg':'IRL.IRL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Ireland locator'
+	options['countrymap_title']='Ireland countrymap'
+	options['euromap_title']='Ireland euromap'
 	options['iszoom']=True
+	options['countryzoom']=20
+	options_global.handle(options,param)
 	return options
 
-def unitedkingdom_options():
-	options={'gsg':'GB1.GBR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'United Kingdom locator'}
+def unitedkingdom_options(param):
+	if param.endswith('/'): return options_global.basic(param,'unitedkingdom','GB1.GBR',isdisputed=True)
+	options={'gsg':'GB1.GBR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='United Kingdom locator'
+	options['countrymap_title']='United Kingdom countrymap'
 	options['moredots_10m']=[(4,False,[ 52] ) ]
 	options['zoomdots_10m']=[(8,False,[ 52] ) ]
 	options['iszoom']=True
+	options['countryzoom']=8
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['zoomdots_10m']=[]
+		options['disputed']=[ "GB1.FLK.Falkland Is.", ]
+		options['disputed_border']=[ "GB1.GBR.Rockall I.", "GB1.GIB.Gibraltar", "GB1.IOT.Br. Indian Ocean Ter.", 
+				"GB1.IOT.Diego Garcia NSF", "GB1.SGS.S. Georgia", "GB1.SGS.S. Sandwich Is.", ]
 	return options
 
-def greece_options():
-	options={'gsg':'GRC.GRC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Greece locator'}
+def greece_options(param):
+	if param.endswith('/'): return options_global.basic(param,'greece')
+	options={'gsg':'GRC.GRC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Greece locator'
+	options['countrymap_title']='Greece countrymap'
+	options['euromap_title']='Greece euromap'
 	options['iszoom']=True
 	options['zoomscale']=4
+	options['countryzoom']=10
 	return options
 
-def zambia_options():
-	options={'gsg':'ZMB.ZMB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Zambia locator'}
-	options['borderlakes']=['Lake Kariba','Lac Moeru']
+def zambia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'zambia')
+	options={'gsg':'ZMB.ZMB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Zambia locator'
+	options['countrymap_title']='Zambia countrymap'
+#	options['borderlakes']=['Lake Kariba','Lac Moeru']
+	options['countryzoom']=8
 	return options
 
-def sierraleone_options():
-	options={'gsg':'SLE.SLE','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Sierra Leone locator'}
+def sierraleone_options(param):
+	if param.endswith('/'): return options_global.basic(param,'sierraleone')
+	options={'gsg':'SLE.SLE','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Sierra Leone locator'
+	options['countrymap_title']='Sierra Leone countrymap'
+	options['countryzoom']=20
 	return options
 
-def guinea_options():
-	options={'gsg':'GIN.GIN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Guinea locator'}
+def guinea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'guinea')
+	options={'gsg':'GIN.GIN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Guinea locator'
+	options['countrymap_title']='Guinea countrymap'
+	options['countryzoom']=12.5
 	return options
 
-def liberia_options():
-	options={'gsg':'LBR.LBR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Liberia locator'}
+def liberia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'liberia')
+	options={'gsg':'LBR.LBR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Liberia locator'
+	options['countrymap_title']='Liberia countrymap'
+	options['countryzoom']=20
 	return options
 
-def centralafricanrepublic_options():
-	options={'gsg':'CAF.CAF','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Central African Republic locator'}
+def centralafricanrepublic_options(param):
+	if param.endswith('/'): return options_global.basic(param,'centralafricanrepublic')
+	options={'gsg':'CAF.CAF','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Central African Republic locator'
+	options['countrymap_title']='Central African Republic countrymap'
+	options['countryzoom']=8
 	return options
 
-def sudan_options():
-	options={'gsg':'SDN.SDN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Sudan locator'}
+def sudan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'sudan','SDN.SDN',isdisputed=True)
+	options={'gsg':'SDN.SDN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Sudan locator'
+	options['countrymap_title']='Sudan countrymap'
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['disputed']=['SDN.SDN.Abyei', "BRT.BRT.Bir Tawil", "EGY.EGY.Halayib Triangle", ]
 	return options
 
-def sudan_disputed_options():
-	options=sudan_options()
-	options['disputed']=['Abyei']
-	return options
-
-def djibouti_options():
-	options={'gsg':'DJI.DJI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Djibouti locator'}
+def djibouti_options(param):
+	if param.endswith('/'): return options_global.basic(param,'djibouti','DJI.DJI',isdisputed=True)
+	options={'gsg':'DJI.DJI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Djibouti locator'
+	options['countrymap_title']='Djibouti countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
+	options['countryzoom']=32
+	options['disputed_border']= [ "ERI.ERI.Doumera Island" ]
 	return options
 
-def eritrea_options():
-	options={'gsg':'ERI.ERI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Eritrea locator'}
+def eritrea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'eritrea','ERI.ERI',isdisputed=True)
+	options={'gsg':'ERI.ERI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Eritrea locator'
+	options['countrymap_title']='Eritrea countrymap'
+	options['countryzoom']=12.5
+	options['disputed_border']= [ "ERI.ERI.Doumera Island" ]
 	return options
 
-def austria_options():
-	options={'gsg':'AUT.AUT','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Austria locator'}
+def austria_options(param):
+	if param.endswith('/'): return options_global.basic(param,'austria')
+	options={'gsg':'AUT.AUT','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Austria locator'
+	options['countrymap_title']='Austria countrymap'
+	options['euromap_title']='Austria euromap'
 	options['iszoom']=True
+	options['countryzoom']=20
 	return options
 
-def iraq_options():
-	options={'gsg':'IRQ.IRQ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,'title':'Iraq locator'}
+def iraq_options(param):
+	if param.endswith('/'): return options_global.basic(param,'iraq')
+	options={'gsg':'IRQ.IRQ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,}
+	options['locatormap_title']='Iraq locator'
+	options['countrymap_title']='Iraq countrymap'
+	options['countryzoom']=10
 	return options
 
-def italy_options():
-	options={'gsg':'ITA.ITA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Italy locator'}
+def italy_options(param):
+	if param.endswith('/'): return options_global.basic(param,'italy')
+	options={'gsg':'ITA.ITA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Italy locator'
+	options['countrymap_title']='Italy countrymap'
+	options['euromap_title']='Italy euromap'
 	options['moredots_10m']=[ (4,False,[3]),(6,False,[18,24]) ] # 18,24
+	options['countryzoom']=8
 	return options
 
-def switzerland_options():
-	options={'gsg':'CHE.CHE','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Switzerland locator'}
+def switzerland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'switzerland')
+	options={'gsg':'CHE.CHE','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Switzerland locator'
+	options['countrymap_title']='Switzerland countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
+	options['countryzoom']=32
 	return options
 
-def iran_options():
-	options={'gsg':'IRN.IRN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Iran locator'}
+def iran_options(param):
+	if param.endswith('/'): return options_global.basic(param,'iran','IRN.IRN',isdisputed=True)
+	options={'gsg':'IRN.IRN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Iran locator'
+	options['countrymap_title']='Iran countrymap'
+	options['countryzoom']=6.25
+	if 'disputed' in param:
+		options['iszoom']=True
+		options['zoomscale']=2.5
+		options['disputed_border']=[ "IRN.IRN.Abu Musa I.", ]
 	return options
 
-def netherlands_options():
-	options={'gsg':'NL1.NLD','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Netherlands locator'}
+def netherlands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'netherlands')
+	options={'gsg':'NL1.NLD','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Netherlands locator'
+	options['countrymap_title']='Netherlands countrymap'
+	options['euromap_title']='Netherlands euromap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['centerindices_10m']=[0]
 	options['moredots_10m']=[ (8,True,[2,3,11]) , (25,True,[0]) ]
 	options['tripelboxes_10m']=[ [0], [2,3,11] ]
+	options['countryzoom']=32
 	return options
 
-def liechtenstein_options():
-	options={'gsg':'LIE.LIE','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Liechtenstein locator'}
+def liechtenstein_options(param):
+	if param.endswith('/'): return options_global.basic(param,'liechtenstein')
+	options={'gsg':'LIE.LIE','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Liechtenstein locator'
+	options['countrymap_title']='Liechtenstein countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=16
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=400
 	return options
 
-def ivorycoast_options():
-	options={'gsg':'CIV.CIV','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Ivory Coast locator'}
+def ivorycoast_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ivorycoast')
+	options={'gsg':'CIV.CIV','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Ivory Coast locator'
+	options['countrymap_title']='Ivory Coast countrymap'
+	options['countryzoom']=12.5
 	return options
 
-def republicofserbia_options():
-	options={'gsg':'SRB.SRB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Republic of Serbia locator'}
+def republicofserbia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'republicofserbia','SRB.SRB',isdisputed=True)
+	options={'gsg':'SRB.SRB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Republic of Serbia locator'
+	options['countrymap_title']='Republic of Serbia countrymap'
+	options['countryzoom']=25
+	if 'disputed' in param:
+		options['disputed']=["KOS.KOS.Kosovo", ]
+		options['disputed_border']=[ "SRB.SRB.Vukovar Island", "SRB.SRB.Šarengrad Island", ]
 	return options
 
-def mali_options():
-	options={'gsg':'MLI.MLI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Mali locator'}
+def mali_options(param):
+	if param.endswith('/'): return options_global.basic(param,'mali')
+	options={'gsg':'MLI.MLI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Mali locator'
+	options['countrymap_title']='Mali countrymap'
+	options['countryzoom']=5
 	return options
 
-def senegal_options():
-	options={'gsg':'SEN.SEN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Senegal locator'}
+def senegal_options(param):
+	if param.endswith('/'): return options_global.basic(param,'senegal')
+	options={'gsg':'SEN.SEN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Senegal locator'
+	options['countrymap_title']='Senegal countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
+	options['countryzoom']=16
 	return options
 
-def nigeria_options():
-	options={'gsg':'NGA.NGA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Nigeria locator'}
+def nigeria_options(param):
+	if param.endswith('/'): return options_global.basic(param,'nigeria')
+	options={'gsg':'NGA.NGA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Nigeria locator'
+	options['countrymap_title']='Nigeria countrymap'
+	options['countryzoom']=8
 	return options
 
-def benin_options():
-	options={'gsg':'BEN.BEN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Benin locator'}
+def benin_options(param):
+	if param.endswith('/'): return options_global.basic(param,'benin')
+	options={'gsg':'BEN.BEN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Benin locator'
+	options['countrymap_title']='Benin countrymap'
+	options['countryzoom']=16
 	return options
 
-def angola_options():
-	options={'gsg':'AGO.AGO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Angola locator'}
+def angola_options(param):
+	if param.endswith('/'): return options_global.basic(param,'angola')
+	options={'gsg':'AGO.AGO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Angola locator'
+	options['countrymap_title']='Angola countrymap'
+	options['countryzoom']=6.25
 	return options
 
-def croatia_options():
-	options={'gsg':'HRV.HRV','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Croatia locator'}
+def croatia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'croatia','HRV.HRV',isdisputed=True)
+	options={'gsg':'HRV.HRV','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Croatia locator'
+	options['countrymap_title']='Croatia countrymap'
+	options['euromap_title']='Croatia euromap'
 	options['iszoom']=True
+	options['countryzoom']=20
+	if 'disputed' in param:
+		options['disputed_border']=[ "HRV.HRV.Dragonja River", "SRB.SRB.Vukovar Island", "SRB.SRB.Šarengrad Island", ]
 	return options
 
-def slovenia_options():
-	options={'gsg':'SVN.SVN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Slovenia locator'}
+def slovenia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'slovenia','SVN.SVN',isdisputed=True)
+	options={'gsg':'SVN.SVN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Slovenia locator'
+	options['countrymap_title']='Slovenia countrymap'
+	options['euromap_title']='Slovenia euromap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=40
+	if 'disputed' in param:
+		options['disputed_border']=[ "HRV.HRV.Dragonja River", ]
 	return options
 
-def qatar_options():
-	options={'gsg':'QAT.QAT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Qatar locator'}
+def qatar_options(param):
+	if param.endswith('/'): return options_global.basic(param,'qatar')
+	options={'gsg':'QAT.QAT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Qatar locator'
+	options['countrymap_title']='Qatar countrymap'
 	options['iszoom']=True
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=40
 	return options
 
-def saudiarabia_options():
-	options={'gsg':'SAU.SAU','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,'title':'Saudi Arabia locator'}
+def saudiarabia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saudiarabia','SAU.SAU',isdisputed=True)
+	options={'gsg':'SAU.SAU','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Saudi Arabia locator'
+	options['countrymap_title']='Saudi Arabia countrymap'
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['disputed_border']=[ "EGY.EGY.Tiran and Sanafir Is.", ]
 	return options
 
-def botswana_options():
-	options={'gsg':'BWA.BWA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Botswana locator'}
+def botswana_options(param):
+	if param.endswith('/'): return options_global.basic(param,'botswana')
+	options={'gsg':'BWA.BWA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Botswana locator'
+	options['countrymap_title']='Botswana countrymap'
+	options['countryzoom']=10
 	return options
 
-def zimbabwe_options():
-	options={'gsg':'ZWE.ZWE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Zimbabwe locator'}
-	options['borderlakes']=['Lake Kariba']
+def zimbabwe_options(param):
+	if param.endswith('/'): return options_global.basic(param,'zimbabwe')
+	options={'gsg':'ZWE.ZWE','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Zimbabwe locator'
+	options['countrymap_title']='Zimbabwe countrymap'
+#	options['borderlakes']=['Lake Kariba']
+	options['countryzoom']=10
 	return options
 
-def bulgaria_options():
-	options={'gsg':'BGR.BGR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Bulgaria locator'}
+def bulgaria_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bulgaria')
+	options={'gsg':'BGR.BGR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Bulgaria locator'
+	options['countrymap_title']='Bulgaria countrymap'
+	options['euromap_title']='Bulgaria euromap'
+	options['countryzoom']=20
 	return options
 
-def thailand_options():
-	options={'gsg':'THA.THA','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':160,'title':'Thailand locator'}
+def thailand_options(param):
+	if param.endswith('/'): return options_global.basic(param,'thailand')
+	options={'gsg':'THA.THA','isinsetleft':True,'lonlabel_lat':32,'latlabel_lon':160,}
+	options['locatormap_title']='Thailand locator'
+	options['countrymap_title']='Thailand countrymap'
+	options['countryzoom']=6.25
 	return options
 
-def sanmarino_options():
-	options={'gsg':'SMR.SMR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'San Marino locator'}
+def sanmarino_options(param):
+	if param.endswith('/'): return options_global.basic(param,'sanmarino')
+	options={'gsg':'SMR.SMR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='San Marino locator'
+	options['countrymap_title']='San Marino countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['moredots_10m']=[ (25,True,[0]) ]
 	options['zoomdots_10m']=[ (15,False,[0]) ]
+	options['countryzoom']=512
 	return options
 
-def haiti_options():
-	options={'gsg':'HTI.HTI','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Haiti locator'}
+def haiti_options(param):
+	if param.endswith('/'): return options_global.basic(param,'haiti','HTI.HTI',isdisputed=True)
+	options={'gsg':'HTI.HTI','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Haiti locator'
+	options['countrymap_title']='Haiti countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,2,[0]) ]
+	options['countryzoom']=32
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "US1.UMI.Navassa I.", ]
 	return options
 
-def dominicanrepublic_options():
-	options={'gsg':'DOM.DOM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Dominican Republic locator'}
+def dominicanrepublic_options(param):
+	if param.endswith('/'): return options_global.basic(param,'dominicanrepublic')
+	options={'gsg':'DOM.DOM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Dominican Republic locator'
+	options['countrymap_title']='Dominican Republic countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
+	options['countryzoom']=25
 	return options
 
-def chad_options():
-	options={'gsg':'TCD.TCD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Chad locator'}
+def chad_options(param):
+	if param.endswith('/'): return options_global.basic(param,'chad')
+	options={'gsg':'TCD.TCD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Chad locator'
+	options['countrymap_title']='Chad countrymap'
+	options['countryzoom']=6.25
 	return options
 
-def kuwait_options():
-	options={'gsg':'KWT.KWT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-22,'title':'Kuwait locator'}
+def kuwait_options(param):
+	if param.endswith('/'): return options_global.basic(param,'kuwait')
+	options={'gsg':'KWT.KWT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-22,}
+	options['locatormap_title']='Kuwait locator'
+	options['countrymap_title']='Kuwait countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=40
 	return options
 
-def elsalvador_options():
-	options={'gsg':'SLV.SLV','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-150,'title':'El Salvador locator'}
+def elsalvador_options(param):
+	if param.endswith('/'): return options_global.basic(param,'elsalvador')
+	options={'gsg':'SLV.SLV','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-150,}
+	options['locatormap_title']='El Salvador locator'
+	options['countrymap_title']='El Salvador countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,2,[0]) ]
+	options['countryzoom']=40
 	return options
 
-def guatemala_options():
-	options={'gsg':'GTM.GTM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Guatemala locator'}
+def guatemala_options(param):
+	if param.endswith('/'): return options_global.basic(param,'guatemala','GTM.GTM',isdisputed=True)
+	options={'gsg':'GTM.GTM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Guatemala locator'
+	options['countrymap_title']='Guatemala countrymap'
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed_border']=[ "BLZ.BLZ.Belize", ]
 	return options
 
-def easttimor_options():
-	options={'gsg':'TLS.TLS','isinsetleft':True,'lonlabel_lat':-25,'latlabel_lon':90,'title':'East Timor locator'}
+def timorleste_options(param):
+	if param.endswith('/'): return options_global.basic(param,'timorleste')
+	options={'gsg':'TLS.TLS','isinsetleft':True,'lonlabel_lat':-25,'latlabel_lon':90,}
+	options['locatormap_title']='Timor-Leste locator'
+	options['countrymap_title']='Timor-Leste countrymap'
 	options['istopinsets']=True
 	options['iszoom']=True
 	options['iszoom34']=True
 	options['zoomscale']=4
 	options['centerdot']=(40,3)
+	options['countryzoom']=16
 	return options
 
-def brunei_options():
-	options={'gsg':'BRN.BRN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':90,'title':'Brunei locator'}
+def brunei_options(param):
+	if param.endswith('/'): return options_global.basic(param,'brunei','BRN.BRN',isdisputed=True)
+	options={'gsg':'BRN.BRN','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':90,}
+	options['locatormap_title']='Brunei locator'
+	options['countrymap_title']='Brunei countrymap'
 	options['istopinsets']=True
 	options['iszoom']=True
 	options['iszoom34']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=40
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "PGA.PGA.Spratly Is.", ]
 	return options
 
-def monaco_options():
-	options={'gsg':'MCO.MCO','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Monaco locator'}
+def monaco_options(param):
+	if param.endswith('/'): return options_global.basic(param,'monaco')
+	options={'gsg':'MCO.MCO','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Monaco locator'
+	options['countrymap_title']='Monaco countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=64
 	options['moredots_10m']=[ (15,4,[0]) ]
+	options['countryzoom']=512
 	return options
 
-def algeria_options():
-	options={'gsg':'DZA.DZA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Algeria locator'}
+def algeria_options(param):
+	if param.endswith('/'): return options_global.basic(param,'algeria')
+	options={'gsg':'DZA.DZA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Algeria locator'
+	options['countrymap_title']='Algeria countrymap'
+	options['countryzoom']=5
 	return options
 
-def mozambique_options():
-	options={'gsg':'MOZ.MOZ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Mozambique locator'}
-	options['borderlakes']=['Lake Malawi']
+def mozambique_options(param):
+	if param.endswith('/'): return options_global.basic(param,'mozambique')
+	options={'gsg':'MOZ.MOZ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Mozambique locator'
+	options['countrymap_title']='Mozambique countrymap'
+#	options['borderlakes']=['Lake Malawi']
+	options['countryzoom']=5
 	return options
 
-def eswatini_options():
-	options={'gsg':'SWZ.SWZ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'eSwatini locator'}
+def eswatini_options(param):
+	if param.endswith('/'): return options_global.basic(param,'eswatini')
+	options={'gsg':'SWZ.SWZ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='eSwatini locator'
+	options['countrymap_title']='eSwatini countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=32
 	return options
 
-def burundi_options():
-	options={'gsg':'BDI.BDI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Burundi locator'}
+def burundi_options(param):
+	if param.endswith('/'): return options_global.basic(param,'burundi')
+	options={'gsg':'BDI.BDI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Burundi locator'
+	options['countrymap_title']='Burundi countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,False,[0]) ]
+	options['countryzoom']=32
 	return options
 
-def rwanda_options():
-	options={'gsg':'RWA.RWA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Rwanda locator'}
+def rwanda_options(param):
+	if param.endswith('/'): return options_global.basic(param,'rwanda')
+	options={'gsg':'RWA.RWA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Rwanda locator'
+	options['countrymap_title']='Rwanda countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,False,[0]) ]
-	options['borderlakes']=['Lake Kivu']
+#	options['borderlakes']=['Lake Kivu']
+	options['countryzoom']=32
 	return options
 
-def myanmar_options():
-	options={'gsg':'MMR.MMR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':50,'title':'Myanmar locator'}
-	options['smalldots']=[29,30]
+def myanmar_options(param):
+	if param.endswith('/'): return options_global.basic(param,'myanmar')
+	options={'gsg':'MMR.MMR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':50,}
+	options['locatormap_title']='Myanmar locator'
+	options['countrymap_title']='Myanmar countrymap'
+	options['moredots_10m']=[(4,False,[29,30]),]
+	options['countryzoom']=5
 	return options
 
-def bangladesh_options():
-	options={'gsg':'BGD.BGD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':50,'title':'Bangladesh locator'}
+def bangladesh_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bangladesh')
+	options={'gsg':'BGD.BGD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':50,}
+	options['locatormap_title']='Bangladesh locator'
+	options['countrymap_title']='Bangladesh countrymap'
+	options['countryzoom']=16
 	return options
 
-def andorra_options():
-	options={'gsg':'AND.AND','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Andorra locator'}
+def andorra_options(param):
+	if param.endswith('/'): return options_global.basic(param,'andorra')
+	options={'gsg':'AND.AND','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Andorra locator'
+	options['countrymap_title']='Andorra countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['moredots_10m']=[ (15,3,[0]) ]
+	options['countryzoom']=256
 	return options
 
-def afghanistan_options():
-	options={'gsg':'AFG.AFG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Afghanistan locator'}
+def afghanistan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'afghanistan')
+	options={'gsg':'AFG.AFG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Afghanistan locator'
+	options['countrymap_title']='Afghanistan countrymap'
+	options['countryzoom']=8
 	return options
 
-def montenegro_options():
-	options={'gsg':'MNE.MNE','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Montenegro locator'}
+def montenegro_options(param):
+	if param.endswith('/'): return options_global.basic(param,'montenegro')
+	options={'gsg':'MNE.MNE','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Montenegro locator'
+	options['countrymap_title']='Montenegro countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=40
 	return options
 
-def bosniaandherzegovina_options():
-	options={'gsg':'BIH.BIH','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Bosnia and Herzegovina locator'}
+def bosniaandherzegovina_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bosniaandherzegovina')
+	options={'gsg':'BIH.BIH','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Bosnia and Herzegovina locator'
+	options['countrymap_title']='Bosnia and Herzegovina countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=20
 	return options
 
-def uganda_options():
-	options={'gsg':'UGA.UGA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Uganda locator'}
-	options['borderlakes']=['Lake Edward','Lake Albert','Lake Victoria']
+def uganda_options(param):
+	if param.endswith('/'): return options_global.basic(param,'uganda')
+	options={'gsg':'UGA.UGA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Uganda locator'
+	options['countrymap_title']='Uganda countrymap'
+#	options['borderlakes']=['Lake Edward','Lake Albert','Lake Victoria']
+	options['countryzoom']=16
 	return options
 
-def usnavalbaseguantanamobay_options():
-	options={'gsg':'CUB.USG','isinsetleft':True,'lonlabel_lat':5,'latlabel_lon':-30,'title':'US Naval Base Guantanamo Bay locator'}
+def usnavalbaseguantanamobay_options(param):
+	if param.endswith('/'): return options_global.basic(param,'usnavalbaseguantanamobay')
+	options={'gsg':'CU1.USG','isinsetleft':True,'lonlabel_lat':5,'latlabel_lon':-30,}
+	options['locatormap_title']='US Naval Base Guantanamo Bay locator'
+	options['countrymap_title']='US Naval Base Guantanamo Bay countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
 	options['zoomscale']=20
 	options['moredots_10m']=[ (20,4,[0]) ]
+	options['countryzoom']=400
 	return options
 
-def cuba_options():
-	options={'gsg':'CUB.CUB','isinsetleft':True,'lonlabel_lat':5,'latlabel_lon':-30,'title':'Cuba locator'}
+def cuba_options(param):
+	if param.endswith('/'): return options_global.basic(param,'cuba','CU1.CUB',isdisputed=True)
+	options={'gsg':'CU1.CUB','isinsetleft':True,'lonlabel_lat':5,'latlabel_lon':-30,}
+	options['locatormap_title']='Cuba locator'
+	options['countrymap_title']='Cuba countrymap'
+	options['countryzoom']=8
+	if 'disputed' in param:
+		options['disputed_border']=[ "CU1.USG.Guantanamo Bay USNB", ]
 	return options
 
-def honduras_options():
-	options={'gsg':'HND.HND','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Honduras locator'}
+def honduras_options(param):
+	if param.endswith('/'): return options_global.basic(param,'honduras','HND.HND',isdisputed=True)
+	options={'gsg':'HND.HND','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Honduras locator'
+	options['countrymap_title']='Honduras countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
-	options['smalldots']=[6]
+	options['moredots_10m']=[(4,False,[6]),]
+	options['countryzoom']=10
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['zoomscale']=2.5
+		options['iszoom34']=False
+		options['disputed_border']=[ "BJN.BJN.Bajo Nuevo Bank (Petrel Is.)", "BLZ.BLZ.Sapodilla Cayes", "SER.SER.Serranilla Bank", ]
 	return options
 
-def ecuador_options():
-	options={'gsg':'ECU.ECU','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Ecuador locator'}
-	
+def ecuador_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ecuador')
+	options={'gsg':'ECU.ECU','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Ecuador locator'
+	options['countrymap_title']='Ecuador countrymap'
 	options['moredots_10m']=[ (20,False,[7]) ]
+	options['countryzoom']=5
 	return options
 
-def colombia_options():
-	options={'gsg':'COL.COL','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Colombia locator'}
-	options['smalldots']=[5,6,7,10]
+def colombia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'colombia','COL.COL',isdisputed=True)
+	options={'gsg':'COL.COL','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Colombia locator'
+	options['countrymap_title']='Colombia countrymap'
+	options['moredots_10m']=[(4,False,[5,6,7,10]),]
+	options['countryzoom']=5
+	options['countrymapdots_10m']=[(4,False,[5,6,7,10])]
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "BJN.BJN.Bajo Nuevo Bank (Petrel Is.)", "SER.SER.Serranilla Bank", ]
 	return options
 
-def paraguay_options():
-	options={'gsg':'PRY.PRY','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Paraguay locator'}
-	options['borderlakes']=['Itaipú Reservoir']
+def paraguay_options(param):
+	if param.endswith('/'): return options_global.basic(param,'paraguay')
+	options={'gsg':'PRY.PRY','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Paraguay locator'
+	options['countrymap_title']='Paraguay countrymap'
+#	options['borderlakes']=['Itaipú Reservoir']
+	options['countryzoom']=10
 	return options
 
-def portugal_options():
-	options={'gsg':'PRT.PRT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Portugal locator'}
+def brazilianisland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'brazilianisland')
+	options={'gsg':'BRI.BRI','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Brazilian Island locator'
+	options['countrymap_title']='Brazilian Island countrymap'
+	options['iszoom']=False
+	options['centerdot']=(20,3)
+	options['countryzoom']=10 # TODO
+#	options['isfullpartlabels'] = True
+	return options
+
+def portugal_options(param):
+	if param.endswith('/'): return options_global.basic(param,'portugal','PRT.PRT',isdisputed=True)
+	options={'gsg':'PRT.PRT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Portugal locator'
+	options['countrymap_title']='Portugal countrymap'
+	options['euromap_title']='Portugal euromap'
 #	options['smalldots']=[2,3,5,6,7,8,9,10,11,12,13,14,15]
 	options['moredots_10m']=[(4,False,(2,3,5,6,7,8,9,10,11,12,13,14,15))]
 	options['euromapdots_50m']= [('PRT.PRT',24,False,[0]), ('PRT.PRT',82,False,[4]) ]
 #	options['ispartlabels']=True
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['iszoom']=True
+		options['zoomscale']=2
+		options['disputed_border']=[ "ESP.ESP.Olivenza", ]
 	return options
 
-def moldova_options():
-	options={'gsg':'MDA.MDA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Moldova locator'}
+def moldova_options(param):
+	if param.endswith('/'): return options_global.basic(param,'moldova','MDA.MDA',isdisputed=True)
+	options={'gsg':'MDA.MDA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Moldova locator'
+	options['countrymap_title']='Moldova countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
+	options['countryzoom']=32
+	if 'disputed' in param:
+		options['zoomscale']=8
+		options['iszoom34']=False
+		options['disputed']=['MDA.MDA.Transnistria']
 	return options
 
-def moldova_disputed_options():
-	options=moldova_options()
-	options['disputed']=['Transnistria']
+def turkmenistan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'turkmenistan')
+	options={'gsg':'TKM.TKM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Turkmenistan locator'
+	options['countrymap_title']='Turkmenistan countrymap'
+#	options['borderlakes']=['Sarygamysh Köli']
+	options['countryzoom']=8
 	return options
 
-def turkmenistan_options():
-	options={'gsg':'TKM.TKM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Turkmenistan locator'}
-	options['borderlakes']=['Sarygamysh Köli']
-	return options
-
-def jordan_options():
-	options={'gsg':'JOR.JOR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Jordan locator'}
+def jordan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'jordan')
+	options={'gsg':'JOR.JOR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Jordan locator'
+	options['countrymap_title']='Jordan countrymap'
 	options['iszoom']=True
 	options['iszoom34']=True
-	options['borderlakes']=['Dead Sea','_deadseasouth']
+#	options['borderlakes']=['Dead Sea','_deadseasouth']
+	options['countryzoom']=16
 	return options
 
-def nepal_options():
-	options={'gsg':'NPL.NPL','isinsetleft':True,'lonlabel_lat':-5,'latlabel_lon':50,'title':'Nepal locator'}
+def nepal_options(param):
+	if param.endswith('/'): return options_global.basic(param,'nepal','NPL.NPL',isdisputed=True)
+	options={'gsg':'NPL.NPL','isinsetleft':True,'lonlabel_lat':-5,'latlabel_lon':50,}
+	options['locatormap_title']='Nepal locator'
+	options['countrymap_title']='Nepal countrymap'
+	options['countryzoom']=10
+	if 'disputed' in param:
+		options['disputed_border']=[ "IND.IND.Near Om Parvat", ]
 	return options
 
-def lesotho_options():
-	options={'gsg':'LSO.LSO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,'title':'Lesotho locator'}
-	options['iszoom']=True
-	options['zoomscale']=2
-	options['iszoom34']=True
-	return options
-
-def cameroon_options():
-	options={'gsg':'CMR.CMR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Cameroon locator'}
-	return options
-
-def gabon_options():
-	options={'gsg':'GAB.GAB','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Gabon locator'}
-	return options
-
-def niger_options():
-	options={'gsg':'NER.NER','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Niger locator'}
-	return options
-
-def burkinafaso_options():
-	options={'gsg':'BFA.BFA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Burkina Faso locator'}
-	return options
-
-def togo_options():
-	options={'gsg':'TGO.TGO','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Togo locator'}
+def lesotho_options(param):
+	if param.endswith('/'): return options_global.basic(param,'lesotho')
+	options={'gsg':'LSO.LSO','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-25,}
+	options['locatormap_title']='Lesotho locator'
+	options['countrymap_title']='Lesotho countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
+	options['countryzoom']=20
 	return options
 
-def ghana_options():
-	options={'gsg':'GHA.GHA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Ghana locator'}
+def cameroon_options(param):
+	if param.endswith('/'): return options_global.basic(param,'cameroon')
+	options={'gsg':'CMR.CMR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Cameroon locator'
+	options['countrymap_title']='Cameroon countrymap'
+	options['countryzoom']=8
 	return options
 
-def guineabissau_options():
-	options={'gsg':'GNB.GNB','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Guinea-Bissau locator'}
+def gabon_options(param):
+	if param.endswith('/'): return options_global.basic(param,'gabon','GAB.GAB',isdisputed=True)
+	options={'gsg':'GAB.GAB','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Gabon locator'
+	options['countrymap_title']='Gabon countrymap'
+	options['countryzoom']=12.5
+	if 'disputed' in param:
+		options['disputed_border']=[ "GAB.GAB.Mbane Island", ]
+	return options
+
+def niger_options(param):
+	if param.endswith('/'): return options_global.basic(param,'niger')
+	options={'gsg':'NER.NER','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Niger locator'
+	options['countrymap_title']='Niger countrymap'
+	options['countryzoom']=8
+	return options
+
+def burkinafaso_options(param):
+	if param.endswith('/'): return options_global.basic(param,'burkinafaso')
+	options={'gsg':'BFA.BFA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Burkina Faso locator'
+	options['countrymap_title']='Burkina Faso countrymap'
+	options['countryzoom']=8
+	return options
+
+def togo_options(param):
+	if param.endswith('/'): return options_global.basic(param,'togo')
+	options={'gsg':'TGO.TGO','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Togo locator'
+	options['countrymap_title']='Togo countrymap'
+	options['iszoom']=True
+	options['zoomscale']=2
+	options['iszoom34']=True
+	options['countryzoom']=16
+	return options
+
+def ghana_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ghana')
+	options={'gsg':'GHA.GHA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Ghana locator'
+	options['countrymap_title']='Ghana countrymap'
+	options['countryzoom']=12.5
+	return options
+
+def guineabissau_options(param):
+	if param.endswith('/'): return options_global.basic(param,'guineabissau')
+	options={'gsg':'GNB.GNB','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Guinea-Bissau locator'
+	options['countrymap_title']='Guinea-Bissau countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,False,[0]) ]
+	options['countryzoom']=32
 	return options
 
-def gibraltar_options():
-	options={'gsg':'GB1.GIB','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Gibraltar locator'}
+def gibraltar_options(param):
+	if param.endswith('/'): return options_global.basic(param,'gibraltar')
+	options={'gsg':'GB1.GIB','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Gibraltar locator'
+	options['countrymap_title']='Gibraltar countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
 	options['zoomscale']=64
 	options['iszoom34']=False
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=512
 	return options
 
-def unitedstatesofamerica_options():
-	options={'gsg':'US1.USA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-45,'title':'United States of America locator'}
+def unitedstatesofamerica_options(param):
+	if param.endswith('/'): return options_global.basic(param,'unitedstatesofamerica','US1.USA',isadmin1=True,isdisputed=True)
+	options={'gsg':'US1.USA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-45,}
+	options['locatormap_title']='United States of America locator'
+	options['countrymap_title']='United States of America countrymap'
 	options['lon']=-110
-	options['smalldots']=[272,273,274,275,276]
+	options['moredots_10m']=[(4,False,[272,273,274,275,276]),]
 	options['tripelboxes_10m']=[ [0], [85,199], [232] ]
 #	options['ispartlabels']=True
-	options['borderlakes']=['Lake Superior','Lake Ontario','Lake Erie','Lake Huron','Lake of the Woods','Upper Red Lake',
-			'Rainy Lake','Lake Saint Clair']
+#	options['borderlakes']=['Lake Superior','Lake Ontario','Lake Erie','Lake Huron','Lake of the Woods','Upper Red Lake',
+#			'Rainy Lake','Lake Saint Clair']
+	options['countryzoom']=1.4
+	options['countrylon']=-115
+	if param=='unitedstatesofamerica/_disputed':
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "BJN.BJN.Bajo Nuevo Bank (Petrel Is.)", "CU1.USG.Guantanamo Bay USNB", 
+				"SER.SER.Serranilla Bank", "US1.UMI.Navassa I.", "US1.UMI.Wake Atoll", ]
+	else: options_global.handle(options,param)
 	return options
 
-def canada_options():
-	options={'gsg':'CAN.CAN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Canada locator'}
+def canada_options(param):
+	if param.endswith('/'): return options_global.basic(param,'canada','CAN.CAN',isadmin1=True,isdisputed=True)
+	options={'gsg':'CAN.CAN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Canada locator'
+	options['countrymap_title']='Canada countrymap'
 #	options['ispartlabels']=True
-	options['borderlakes']=['Lake Superior','Lake Ontario','Lake Erie','Lake Huron','Lake of the Woods','Upper Red Lake',
-			'Rainy Lake','Lake Saint Clair']
+#	options['borderlakes']=['Lake Superior','Lake Ontario','Lake Erie','Lake Huron','Lake of the Woods','Upper Red Lake',
+#			'Rainy Lake','Lake Saint Clair']
+	options['countryzoom']=2
+	options['countrylon']=-90
+	if param=='canada/_disputed':
+		options['disputed']=[ "DN1.GRL.Hans Island", ]
+	elif param=='canada/princeedwardisland':
+		options_global.handle(options,param)
+		options['admin1dot']=80
+	else: options_global.handle(options,param)
 	return options
 
-def mexico_options():
-	options={'gsg':'MEX.MEX','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-150,'title':'Mexico locator'}
-	options['smalldots']=[1,2,3,32,34,36]
+def mexico_options(param):
+	if param.endswith('/'): return options_global.basic(param,'mexico','MEX.MEX',isadmin1=True,isdisputed=False)
+	options={'gsg':'MEX.MEX','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-150,}
+	options['locatormap_title']='Mexico locator'
+	options['countrymap_title']='Mexico countrymap'
+	options['moredots_10m']=[(4,False,[1,2,3,32,34,36]),]
+	options['countryzoom']=3.5
+	if param=='mexico/islaperez':
+		options['admin1']='MEX.MEX..' # blank
+		options['admin1dot']=20
+	else: options_global.handle(options,param)
 	return options
 
-def belize_options():
-	options={'gsg':'BLZ.BLZ','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Belize locator'}
+def belize_options(param):
+	if param.endswith('/'): return options_global.basic(param,'belize','BLZ.BLZ',isadmin1=False,isdisputed=True)
+	options={'gsg':'BLZ.BLZ','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Belize locator'
+	options['countrymap_title']='Belize countrymap'
 	options['moredots_10m']=[ (30,2,[0]) ]
 	options['iszoom']=True
 	options['iszoom34']=True
+	options['countryzoom']=32
+	if param=='belize/_disputed':
+		options['moredots_10m']=[]
+		options['iszoom34']=False
+		options['zoomscale']=8
+		options['disputed']=[ "BLZ.BLZ.Belize", ]
+		options['disputed_border']=[ "BLZ.BLZ.Sapodilla Cayes", ]
 	return options
 
-def panama_options():
-	options={'gsg':'PAN.PAN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Panama locator'}
+def panama_options(param):
+	if param.endswith('/'): return options_global.basic(param,'panama')
+	options={'gsg':'PAN.PAN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Panama locator'
+	options['countrymap_title']='Panama countrymap'
+	options['countryzoom']=16
 	return options
 
-def venezuela_options():
-	options={'gsg':'VEN.VEN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Venezuela locator'}
-	options['smalldots']=[ 20 ]
+def venezuela_options(param):
+	if param.endswith('/'): return options_global.basic(param,'venezuela','VEN.VEN',isdisputed=True)
+	options={'gsg':'VEN.VEN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Venezuela locator'
+	options['countrymap_title']='Venezuela countrymap'
+	options['moredots_10m']=[(4,False,[ 20 ]),]
+	options['countryzoom']=6.25
+	options['countrymapdots_10m']=[(4,False,[ 20 ])]
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed']=[ "GUY.GUY.West of Essequibo River", ]
+		options['disputed_border']=[ "VEN.VEN.Bird Island", ]
 	return options
 
-def papuanewguinea_options():
-	options={'gsg':'PNG.PNG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Papua New Guinea locator'}
+def papuanewguinea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'papuanewguinea')
+	options={'gsg':'PNG.PNG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Papua New Guinea locator'
+	options['countrymap_title']='Papua New Guinea countrymap'
+	options['countryzoom']=5
 	return options
 
-def egypt_options():
-	options={'gsg':'EGY.EGY','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Egypt locator'}
+def egypt_options(param):
+	if param.endswith('/'): return options_global.basic(param,'egypt','EGY.EGY',isdisputed=True)
+	options={'gsg':'EGY.EGY','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Egypt locator'
+	options['countrymap_title']='Egypt countrymap'
+	options['countryzoom']=8
+	if 'disputed' in param:
+		options['disputed_border']=[ "EGY.EGY.Tiran and Sanafir Is.", "IS1.PSX.Gaza", ]
+		options['disputed']=[ "BRT.BRT.Bir Tawil", "EGY.EGY.Halayib Triangle", ]
 	return options
 
-def yemen_options():
-	options={'gsg':'YEM.YEM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Yemen locator'}
+def yemen_options(param):
+	if param.endswith('/'): return options_global.basic(param,'yemen')
+	options={'gsg':'YEM.YEM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Yemen locator'
+	options['countrymap_title']='Yemen countrymap'
+	options['countryzoom']=8
 	return options
 
-def mauritania_options():
-	options={'gsg':'MRT.MRT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Mauritania locator'}
+def mauritania_options(param):
+	if param.endswith('/'): return options_global.basic(param,'mauritania')
+	options={'gsg':'MRT.MRT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Mauritania locator'
+	options['countrymap_title']='Mauritania countrymap'
+	options['countryzoom']=6.25
 	return options
 
-def equatorialguinea_options():
-	options={'gsg':'GNQ.GNQ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Equatorial Guinea locator'}
+def equatorialguinea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'equatorialguinea','GNQ.GNQ',isdisputed=True)
+	options={'gsg':'GNQ.GNQ','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Equatorial Guinea locator'
+	options['countrymap_title']='Equatorial Guinea countrymap'
 	options['iszoom']=True
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,2,[0]),(4,False,[1]) ]
 	options['zoomdots_10m']=[ (8,False,[1]) ]
+	options['countryzoom']=12.5
+	options['countrymapdots_10m']=[ (4,False,[1]) ]
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "GAB.GAB.Mbane Island", ]
 	return options
 
-def gambia_options():
-	options={'gsg':'GMB.GMB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Gambia locator'}
+def gambia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'gambia')
+	options={'gsg':'GMB.GMB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Gambia locator'
+	options['countrymap_title']='Gambia countrymap'
 	options['moredots_10m']=[ (25,2,[0]) ]
 	options['iszoom']=True
 	options['zoomscale']=5
+	options['countryzoom']=25
 	return options
 
-def hongkongsar_options():
-	options={'gsg':'CH1.HKG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':175,'title':'Hong Kong S.A.R. locator'}
+def hongkongsar_options(param):
+	if param.endswith('/'): return options_global.basic(param,'hongkongsar')
+	options={'gsg':'CH1.HKG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':175,}
+	options['locatormap_title']='Hong Kong S.A.R. locator'
+	options['countrymap_title']='Hong Kong S.A.R. countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=10
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=100
 	return options
 
-def vatican_options():
-	options={'gsg':'VAT.VAT','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Vatican locator'}
+def vatican_options(param):
+	if param.endswith('/'): return options_global.basic(param,'vatican')
+	options={'gsg':'VAT.VAT','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Vatican locator'
+	options['countrymap_title']='Vatican countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7181,18 +9601,31 @@ def vatican_options():
 	options['iszoom34']=False
 	options['moredots_10m']=[ (10,True,[0]) ]
 	options['zoomdots_10m']=[ (15,False,[0]) ]
+	options['countryzoom']=16
+	options['countrymapdots_10m']=[ (10,False,[0]) ]
 	return options
 
-def northerncyprus_options():
-	options={'gsg':'CYN.CYN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Northern Cyprus locator'}
+def northerncyprus_options(param):
+	if param.endswith('/'): return options_global.basic(param,'northerncyprus','CYN.CYN',isdisputed=True)
+	options={'gsg':'CYN.CYN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Northern Cyprus locator'
+	options['countrymap_title']='Northern Cyprus countrymap'
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=False
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=50
+	options['countrylon']=33.4
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed']=['CYN.CYN.N. Cyprus', "CNM.CNM.Cyprus U.N. Buffer Zone", ]
 	return options
 
-def cyprusnomansarea_options():
-	options={'gsg':'CNM.CNM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Cyprus No Mans Area locator'}
+def cyprusnomansarea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'cyprusnomansarea')
+	options={'gsg':'CNM.CNM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Cyprus No Mans Area locator'
+	options['countrymap_title']='Cyprus No Mans Area countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
@@ -7200,99 +9633,192 @@ def cyprusnomansarea_options():
 	options['iszoom34']=False
 	options['moredots_10m']=[ (20,3,[0]) ]
 	options['issubland']=False
+	options['countryzoom']=50
 	return options
 
-def siachenglacier_options():
-	options={'gsg':'KAS.KAS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Siachen Glacier locator'}
+def siachenglacier_options(param):
+	if param.endswith('/'): return options_global.basic(param,'siachenglacier')
+	options={'gsg':'KAS.KAS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Siachen Glacier locator'
+	options['countrymap_title']='Siachen Glacier countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=False
 	options['moredots_10m']=[ (20,2,[0]) ]
+	options['countryzoom']=4
 	return options
 
-def baykonurcosmodrome_options():
-	options={'gsg':'KAZ.KAB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Baykonur Cosmodrome locator'}
+def baykonurcosmodrome_options(param):
+	if param.endswith('/'): return options_global.basic(param,'baykonurcosmodrome')
+	options={'gsg':'KA1.KAB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Baykonur Cosmodrome locator'
+	options['countrymap_title']='Baykonur Cosmodrome countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,2,[0]) ]
+	options['countryzoom']=4
 	return options
 
-def akrotirisovereignbasearea_options():
-	options={'gsg':'GB1.WSB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Akrotiri Sovereign Base Area locator'}
+def akrotirisovereignbasearea_options(param):
+	if param.endswith('/'): return options_global.basic(param,'akrotirisovereignbasearea')
+	options={'gsg':'GB1.WSB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Akrotiri Sovereign Base Area locator'
+	options['countrymap_title']='Akrotiri Sovereign Base Area countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
 	options['zoomscale']=16
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=50
+	options['countrylon']=33.4
 	return options
 
-def antarctica_options():
-	options={'gsg':'ATA.ATA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Antarctica locator'}
+def southernpatagonianicefield_options(param):
+	if param.endswith('/'): return options_global.basic(param,'southernpatagonianicefield')
+	options={'gsg':'SPI.SPI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Southern Patagonian Ice Field locator'
+	options['countrymap_title']='Southern Patagonian Ice Field countrymap'
+	options['presence']=['10m']
+	options['iszoom']=True
+	options['iszoom34']=True
+	options['zoomscale']=5
+	options['centerdot']=(20,3)
+	options['countryzoom']=50 # TODO
+	return options
+
+def birtawil_options(param):
+	if param.endswith('/'): return options_global.basic(param,'birtawil')
+	options={'gsg':'BRT.BRT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Bir Tawil locator'
+	options['countrymap_title']='Bir Tawil countrymap'
+	options['presence']=['10m']
+	options['iszoom']=True
+	options['iszoom34']=True
+	options['zoomscale']=5
+	options['centerdot']=(20,3)
+	options['countryzoom']=50 # TODO
+	return options
+
+def antarctica_options(param):
+	if param.endswith('/'): return options_global.basic(param,'antarctica')
+	options={'gsg':'ATA.ATA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Antarctica locator'
+	options['countrymap_title']='Antarctica countrymap'
 	options['istopinsets']=True
+	options['countryzoom']=2
+	options['countrylon']=0
+	options['countrylat']=-89
 	return options
 
-def australia_options():
-	options={'gsg':'AU1.AUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Australia locator'}
-	options['smalldots']=[ 12, 33 ]
+def australia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'australia')
+	options={'gsg':'AU1.AUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Australia locator'
+	options['countrymap_title']='Australia countrymap'
+	options['moredots_10m']=[ (4,False[12, 33 ]),]
+	options['countryzoom']=2
 	return options
 
-def greenland_options():
-	options={'gsg':'DN1.GRL','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Greenland locator'}
+def greenland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'greenland')
+	options={'gsg':'DN1.GRL','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Greenland locator'
+	options['countrymap_title']='Greenland countrymap'
+	options['countryzoom']=2
 	return options
 
-def fiji_options():
-	options={'gsg':'FJI.FJI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':150,'title':'Fiji locator'}
+def fiji_options(param):
+	if param.endswith('/'): return options_global.basic(param,'fiji')
+	options={'gsg':'FJI.FJI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':150,}
+	options['locatormap_title']='Fiji locator'
+	options['countrymap_title']='Fiji countrymap'
 	options['iszoom']=True
 	options['iszoom34']=True
 	options['zoomscale']=2.5
 #	options['ispartlabels']=True
 	options['centerindices_10m']=[20]
 	options['tripelboxes_10m']=[ [0],[24] ]
-	options['smalldots']=[ 34,35,36,37 ]
+#	options['smalldots_10m']=[ 34,35,36,37 ]
 	options['zoomdots_10m']=[ (10,False,[34,35]) ]
 	options['centerdot']=(55,2)
+	options['countryzoom']=8
 	return options
 
-def newzealand_options():
-	options={'gsg':'NZ1.NZL','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':-150,'title':'New Zealand locator'}
+def newzealand_options(param):
+	if param.endswith('/'): return options_global.basic(param,'newzealand','NZ1.NZ1',isdisputed=True)
+	options={'gsg':'NZ1.NZL','isinsetleft':False,'lonlabel_lat':10,'latlabel_lon':-150,}
+	options['locatormap_title']='New Zealand locator'
+	options['countrymap_title']='New Zealand countrymap'
 	options['centerindices_10m']=[17]
 	options['tripelboxes_10m']=[ [7],[17] ]
-	options['smalldots']=[ 1,2,3,4,5,6,7,8]
+	options['moredots_10m']=[ (4,False,[ 1,2,3,4,5,6,7,8]),]
+	options['countryzoom']=2.5
+	options['countrymapdots_10m']=[[8,False,[ 6,7]]]
+	options['countrylat']=-30.57177
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "US1.ASM.Swains Island", ]
 	return options
 
-def newcaledonia_options():
-	options={'gsg':'FR1.NCL','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-150,'title':'New Caledonia locator'}
+def newcaledonia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'newcaledonia')
+	options={'gsg':'FR1.NCL','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-150,}
+	options['locatormap_title']='New Caledonia locator'
+	options['countrymap_title']='New Caledonia countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['moredots_10m']=[ (4,False,[10]) ]
 	options['centerdot']=(40,2)
 #	options['ispartlabels']=True
+	options['countryzoom']=12.5
+	options['countrymapdots_10m']=[ (4,False,[10]) ]
 	return options
 
-def madagascar_options():
-	options={'gsg':'MDG.MDG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Madagascar locator'}
+def madagascar_options(param):
+	if param.endswith('/'): return options_global.basic(param,'madagascar','MDG.MDG',isdisputed=True)
+	options={'gsg':'MDG.MDG','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Madagascar locator'
+	options['countrymap_title']='Madagascar countrymap'
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['iszoom']=True
+		options['zoomscale']=2
+		options['disputed_border']=[ "FR1.ATF.Bassas da India", "FR1.ATF.Europa Island", "FR1.ATF.Glorioso Is.", "FR1.ATF.Juan De Nova I.", ]
 	return options
 
-def philippines_options():
-	options={'gsg':'PHL.PHL','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':180,'title':'Philippines locator'}
+def philippines_options(param):
+	if param.endswith('/'): return options_global.basic(param,'philippines','PHL.PHL',isdisputed=True)
+	options={'gsg':'PHL.PHL','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':180,}
+	options['locatormap_title']='Philippines locator'
+	options['countrymap_title']='Philippines countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
+	options['countryzoom']=5
+	if 'disputed' in param:
+		options['disputed_border']=[ "PGA.PGA.Spratly Is.", "SCR.SCR.Scarborough Reef", ]
 	return options
 
-def srilanka_options():
-	options={'gsg':'LKA.LKA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':90,'title':'Sri Lanka locator'}
+def srilanka_options(param):
+	if param.endswith('/'): return options_global.basic(param,'srilanka')
+	options={'gsg':'LKA.LKA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':90,}
+	options['locatormap_title']='Sri Lanka locator'
+	options['countrymap_title']='Sri Lanka countrymap'
+	options['countryzoom']=8
 	return options
 
-def curacao_options():
-	options={'gsg':'NL1.CUW','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Curaçao locator'}
+def curacao_options(param):
+	if param.endswith('/'): return options_global.basic(param,'curacao')
+	options={'gsg':'NL1.CUW','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Curaçao locator'
+	options['countrymap_title']='Curaçao countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7300,10 +9826,14 @@ def curacao_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=40
 	return options
 
-def aruba_options():
-	options={'gsg':'NL1.ABW','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Aruba locator'}
+def aruba_options(param):
+	if param.endswith('/'): return options_global.basic(param,'aruba')
+	options={'gsg':'NL1.ABW','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Aruba locator'
+	options['countrymap_title']='Aruba countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7311,19 +9841,27 @@ def aruba_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=40
 	return options
 
-def thebahamas_options():
-	options={'gsg':'BHS.BHS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'The Bahamas locator'}
+def thebahamas_options(param):
+	if param.endswith('/'): return options_global.basic(param,'thebahamas')
+	options={'gsg':'BHS.BHS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='The Bahamas locator'
+	options['countrymap_title']='The Bahamas countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=False
 #	options['moredots_10m']=[ (50,False,[8]) ]
 	options['centerdot']=(50,3)
+	options['countryzoom']=10
 	return options
 
-def turksandcaicosislands_options():
-	options={'gsg':'GB1.TCA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Turks and Caicos Islands locator'}
+def turksandcaicosislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'turksandcaicosislands')
+	options={'gsg':'GB1.TCA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Turks and Caicos Islands locator'
+	options['countrymap_title']='Turks and Caicos Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7331,45 +9869,72 @@ def turksandcaicosislands_options():
 	options['iszoom34']=False
 #	options['moredots_10m']=[ (20,True,[8]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=32
 	return options
 
-def taiwan_options():
-	options={'gsg':'TWN.TWN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Taiwan locator'}
+def taiwan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'taiwan','TWN.TWN',isdisputed=True)
+	options={'gsg':'TWN.TWN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Taiwan locator'
+	options['countrymap_title']='Taiwan countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['moredots_10m']=[ (4,False,[2]), (20,3,[0]) ]
+	options['countryzoom']=12.5
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "CH1.CHN.Paracel Is.", "JPN.JPN.Pinnacle Is.", "PGA.PGA.Spratly Is.", 
+				"SCR.SCR.Scarborough Reef", ]
+		options['disputed']=[ "TWN.TWN.Taiwan", ]
 	return options
 
-def japan_options():
-	options={'gsg':'JPN.JPN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Japan locator'}
-	options['smalldots_10m']=[ 60,80, 14, 62, 12, 59, 61, 54, 84, 66, 67, 16]
+def japan_options(param):
+	if param.endswith('/'): return options_global.basic(param,'japan','JPN.JPN',isdisputed=True)
+	options={'gsg':'JPN.JPN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Japan locator'
+	options['countrymap_title']='Japan countrymap'
+	options['moredots_10m']=[ (4,False,[ 60,80, 14, 62, 12, 59, 61, 54, 84, 66, 67, 16]), ]
+	options['countryzoom']=3
+	if 'disputed' in param:
+		options['iszoom']=True
+		options['zoomlon']=147
+		options['zoomlat']=45
+		options['zoomscale']=6.25
+		options['moredots_10m']=[]
+		options['disputed_border']=['RUS.RUS.Kuril Is.', "JPN.JPN.Pinnacle Is.", "KOR.KOR.Dokdo", ]
 	return options
 
-def japan_disputed_options():
-	options=japan_options()
-	options['disputed_border']=['Kuril Is.']
-	return options
-
-def saintpierreandmiquelon_options():
-	options={'gsg':'FR1.SPM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Saint Pierre and Miquelon locator'}
+def saintpierreandmiquelon_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saintpierreandmiquelon')
+	options={'gsg':'FR1.SPM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Pierre and Miquelon locator'
+	options['countrymap_title']='Saint Pierre and Miquelon countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=16
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(25,4)
+	options['countryzoom']=64
 	return options
 
-def iceland_options():
-	options={'gsg':'ISL.ISL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-60,'title':'Iceland locator'}
+def iceland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'iceland')
+	options={'gsg':'ISL.ISL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-60,}
+	options['locatormap_title']='Iceland locator'
+	options['countrymap_title']='Iceland countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
+	options['countryzoom']=8
 	return options
 
-def pitcairnislands_options():
-	options={'gsg':'GB1.PCN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Pitcairn Islands locator'}
+def pitcairnislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'pitcairnislands')
+	options={'gsg':'GB1.PCN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Pitcairn Islands locator'
+	options['countrymap_title']='Pitcairn Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 #	options['moredots_10m']=[ (10,True,[0,1,2,3]) ]
@@ -7379,10 +9944,15 @@ def pitcairnislands_options():
 	options['zoomscale']=5
 	options['zoomdots_10m']=[ (15,False,[0,1,2,3]) ]
 	options['iszoom34']=True
+	options['countryzoom']=12.5
+	options['countrymapdots_10m']=[ (5,False,[0,1,2,3]) ]
 	return options
 
-def frenchpolynesia_options():
-	options={'gsg':'FR1.PYF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'French Polynesia locator'}
+def frenchpolynesia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'frenchpolynesia')
+	options={'gsg':'FR1.PYF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='French Polynesia locator'
+	options['countrymap_title']='French Polynesia countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 #	options['moredots_10m']=[ (100,True,[87]) ]
@@ -7393,15 +9963,24 @@ def frenchpolynesia_options():
 		zds=[]
 		for i in range(88): zds.append(i)
 		options['zoomdots_10m']=[ (5,False,zds) ]
+	options['countryzoom']=5
 	return options
 
-def frenchsouthernandantarcticlands_options():
-	options={'gsg':'FR1.ATF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'French Southern and Antarctic Lands locator'}
+def frenchsouthernandantarcticlands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'frenchsouthernandantarcticlands')
+	options={'gsg':'FR1.ATF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='French Southern and Antarctic Lands locator'
+	options['countrymap_title']='French Southern and Antarctic Lands countrymap'
 	options['moredots_10m']=[ (12,3,[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]) ]
+	options['countryzoom']=2
+	options['countrymapdots_10m']=[ (8,False,[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]) ]
 	return options
 
-def seychelles_options():
-	options={'gsg':'SYC.SYC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Seychelles locator'}
+def seychelles_options(param):
+	if param.endswith('/'): return options_global.basic(param,'seychelles','SYC.SYC',isdisputed=True)
+	options={'gsg':'SYC.SYC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Seychelles locator'
+	options['countrymap_title']='Seychelles countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	dots=[]
@@ -7412,10 +9991,18 @@ def seychelles_options():
 	options['zoomscale']=2
 	options['iszoom34']=False
 	
+	options['countryzoom']=8
+	options['countrymapdots_10m']=[ (12,False,dots) ]
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "GB1.IOT.Br. Indian Ocean Ter.", "GB1.IOT.Diego Garcia NSF", ]
 	return options
 
-def kiribati_options():
-	options={'gsg':'KIR.KIR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-130,'title':'Kiribati locator'}
+def kiribati_options(param):
+	if param.endswith('/'): return options_global.basic(param,'kiribati')
+	options={'gsg':'KIR.KIR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-130,}
+	options['locatormap_title']='Kiribati locator'
+	options['countrymap_title']='Kiribati countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['centerindices_10m']=[26]
@@ -7423,10 +10010,16 @@ def kiribati_options():
 	dots=[]
 	for i in range(35): dots.append(i)
 	options['moredots_10m']=[ (8,False,dots) ]
+	options['countryzoom']=2.5
+	options['countrylat']=-3.369012
+	options['countrymapdots_10m']=[ (8,False,[1,32]) ]
 	return options
 
-def marshallislands_options():
-	options={'gsg':'MHL.MHL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,'title':'Marshall Islands locator'}
+def marshallislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'marshallislands','MHL.MHL',isdisputed=True)
+	options={'gsg':'MHL.MHL','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,}
+	options['locatormap_title']='Marshall Islands locator'
+	options['countrymap_title']='Marshall Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	dots=[]
@@ -7436,29 +10029,45 @@ def marshallislands_options():
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['zoomdots_10m']=[ (5,False,dots) ]
+	options['countryzoom']=8
+# countrymap is weak
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "US1.UMI.Wake Atoll", ]
 	return options
 
-def trinidadandtobago_options():
-	options={'gsg':'TTO.TTO','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Trinidad and Tobago locator'}
+def trinidadandtobago_options(param):
+	if param.endswith('/'): return options_global.basic(param,'trinidadandtobago')
+	options={'gsg':'TTO.TTO','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Trinidad and Tobago locator'
+	options['countrymap_title']='Trinidad and Tobago countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=16
 	return options
 
-def grenada_options():
-	options={'gsg':'GRD.GRD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Grenada locator'}
+def grenada_options(param):
+	if param.endswith('/'): return options_global.basic(param,'grenada')
+	options={'gsg':'GRD.GRD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Grenada locator'
+	options['countrymap_title']='Grenada countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['iszoom34']=True
 	options['moredots_10m']=[ (30,3,[0]) ]
+	options['countryzoom']=20
 	return options
 
-def saintvincentandthegrenadines_options():
-	options={'gsg':'VCT.VCT','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Saint Vincent and the Grenadines locator'}
+def saintvincentandthegrenadines_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saintvincentandthegrenadines')
+	options={'gsg':'VCT.VCT','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Vincent and the Grenadines locator'
+	options['countrymap_title']='Saint Vincent and the Grenadines countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7466,20 +10075,28 @@ def saintvincentandthegrenadines_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=32
 	return options
 
-def barbados_options():
-	options={'gsg':'BRB.BRB','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Barbados locator'}
+def barbados_options(param):
+	if param.endswith('/'): return options_global.basic(param,'barbados')
+	options={'gsg':'BRB.BRB','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Barbados locator'
+	options['countrymap_title']='Barbados countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=20
 	return options
 
-def saintlucia_options():
-	options={'gsg':'LCA.LCA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Saint Lucia locator'}
+def saintlucia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saintlucia')
+	options={'gsg':'LCA.LCA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Lucia locator'
+	options['countrymap_title']='Saint Lucia countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 #	options['ispartlabels']=True
@@ -7487,10 +10104,14 @@ def saintlucia_options():
 	options['zoomscale']=5
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=20
 	return options
 
-def dominica_options():
-	options={'gsg':'DMA.DMA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Dominica locator'}
+def dominica_options(param):
+	if param.endswith('/'): return options_global.basic(param,'dominica')
+	options={'gsg':'DMA.DMA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Dominica locator'
+	options['countrymap_title']='Dominica countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7498,10 +10119,14 @@ def dominica_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=20
 	return options
 
-def unitedstatesminoroutlyingislands_options():
-	options={'gsg':'US1.UMI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-130,'title':'United States Minor Outlying Islands locator'}
+def unitedstatesminoroutlyingislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'unitedstatesminoroutlyingislands')
+	options={'gsg':'US1.UMI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-130,}
+	options['locatormap_title']='United States Minor Outlying Islands locator'
+	options['countrymap_title']='United States Minor Outlying Islands countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['tripelboxes_10m']=[ [5],[10],[0,1,2,3,4,  6,7,8,9,  11,12] ]
@@ -7510,10 +10135,16 @@ def unitedstatesminoroutlyingislands_options():
 	dots=[]
 	for i in range(13): dots.append(i)
 	options['moredots_10m']=[ (20,True,dots) ]
+	options['countryzoom']=1
+	options['countrymapdots_10m']=[ (10,True,dots) ]
+	options['countrylon']=-120
 	return options
 
-def montserrat_options():
-	options={'gsg':'GB1.MSR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Montserrat locator'}
+def montserrat_options(param):
+	if param.endswith('/'): return options_global.basic(param,'montserrat')
+	options={'gsg':'GB1.MSR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Montserrat locator'
+	options['countrymap_title']='Montserrat countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7522,10 +10153,14 @@ def montserrat_options():
 	options['zoomdots_10m']=[ (15,False,[0]) ]
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=16
 	return options
 
-def antiguaandbarbuda_options():
-	options={'gsg':'ATG.ATG','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Antigua and Barbuda locator'}
+def antiguaandbarbuda_options(param):
+	if param.endswith('/'): return options_global.basic(param,'antiguaandbarbuda')
+	options={'gsg':'ATG.ATG','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Antigua and Barbuda locator'
+	options['countrymap_title']='Antigua and Barbuda countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7534,10 +10169,14 @@ def antiguaandbarbuda_options():
 	options['zoomdots_10m']=[ (10,False,[0,1]) ]
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=20
 	return options
 
-def saintkittsandnevis_options():
-	options={'gsg':'KNA.KNA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Saint Kitts and Nevis locator'}
+def saintkittsandnevis_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saintkittsandnevis')
+	options={'gsg':'KNA.KNA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Kitts and Nevis locator'
+	options['countrymap_title']='Saint Kitts and Nevis countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7546,10 +10185,14 @@ def saintkittsandnevis_options():
 	options['zoomdots_10m']=[ (25,False,[0]) ]
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=20
 	return options
 
-def unitedstatesvirginislands_options():
-	options={'gsg':'US1.VIR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'United States Virgin Islands locator'}
+def unitedstatesvirginislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'unitedstatesvirginislands')
+	options={'gsg':'US1.VIR','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='United States Virgin Islands locator'
+	options['countrymap_title']='United States Virgin Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7557,10 +10200,14 @@ def unitedstatesvirginislands_options():
 	options['iszoom34']=False
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=20
 	return options
 
-def saintbarthelemy_options():
-	options={'gsg':'FR1.BLM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Saint Barthelemy locator'}
+def saintbarthelemy_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saintbarthelemy')
+	options={'gsg':'FR1.BLM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Barthelemy locator'
+	options['countrymap_title']='Saint Barthelemy countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7568,20 +10215,28 @@ def saintbarthelemy_options():
 	options['iszoom34']=True
 	options['zoomdots_10m']=[ (10,False,[0]) ]
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=32
 	return options
 
-def puertorico_options():
-	options={'gsg':'US1.PRI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Puerto Rico locator'}
+def puertorico_options(param):
+	if param.endswith('/'): return options_global.basic(param,'puertorico')
+	options={'gsg':'US1.PRI','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Puerto Rico locator'
+	options['countrymap_title']='Puerto Rico countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['zoomdots_10m']=[ (10,False,[0,1,2]) ]
 #	options['moredots_10m']=[ (30,True,[3]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=10
 	return options
 
-def anguilla_options():
-	options={'gsg':'GB1.AIA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Anguilla locator'}
+def anguilla_options(param):
+	if param.endswith('/'): return options_global.basic(param,'anguilla')
+	options={'gsg':'GB1.AIA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Anguilla locator'
+	options['countrymap_title']='Anguilla countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7590,10 +10245,14 @@ def anguilla_options():
 	options['zoomdots_10m']=[ (4,False,[0,1]) ]
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=64
 	return options
 
-def britishvirginislands_options():
-	options={'gsg':'GB1.VGB','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'British Virgin Islands locator'}
+def britishvirginislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'britishvirginislands')
+	options={'gsg':'GB1.VGB','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='British Virgin Islands locator'
+	options['countrymap_title']='British Virgin Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7602,18 +10261,29 @@ def britishvirginislands_options():
 #	options['zoomdots_10m']=[ (4,False,[0,1,2,3,4,5]) ]
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=40
 	return options
 
-def jamaica_options():
-	options={'gsg':'JAM.JAM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Jamaica locator'}
+def jamaica_options(param):
+	if param.endswith('/'): return options_global.basic(param,'jamaica','JAM.JAM',isdisputed=True)
+	options={'gsg':'JAM.JAM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Jamaica locator'
+	options['countrymap_title']='Jamaica countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,3,[0]) ]
+	options['countryzoom']=10
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "BJN.BJN.Bajo Nuevo Bank (Petrel Is.)", "SER.SER.Serranilla Bank", ]
 	return options
 
-def caymanislands_options():
-	options={'gsg':'GB1.CYM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Cayman Islands locator'}
+def caymanislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'caymanislands')
+	options={'gsg':'GB1.CYM','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Cayman Islands locator'
+	options['countrymap_title']='Cayman Islands countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
@@ -7621,42 +10291,67 @@ def caymanislands_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=16
 	return options
 
-def bermuda_options():
-	options={'gsg':'GB1.BMU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Bermuda locator'}
+def bermuda_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bermuda')
+	options={'gsg':'GB1.BMU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Bermuda locator'
+	options['countrymap_title']='Bermuda countrymap'
 	options['presence']=['10m','50m'] 
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['iszoom34']=True
 	options['zoomm']='10m'
 	options['moredots_10m']=[ (15,4,[0]) ]
+	options['countryzoom']=256
 	return options
 
-def heardislandandmcdonaldislands_options():
-	options={'gsg':'AU1.HMD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':90,'title':'Heard Island and McDonald Islands locator'}
+def heardislandandmcdonaldislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'heardislandandmcdonaldislands')
+	options={'gsg':'AU1.HMD','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':90,}
+	options['locatormap_title']='Heard Island and McDonald Islands locator'
+	options['countrymap_title']='Heard Island and McDonald Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,True)
+	options['countryzoom']=200
 	return options
 
-def sainthelena_options():
-	options={'gsg':'GB1.SHN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Saint Helena locator'}
+def sainthelena_options(param):
+	if param.endswith('/'): return options_global.basic(param,'sainthelena')
+	options={'gsg':'GB1.SHN','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Saint Helena locator'
+	options['countrymap_title']='Saint Helena countrymap'
 	options['presence']=['10m','50m'] 
 	options['moredots_10m']=[ (10,3,[0,1,2,3]) ]
+	options['countryzoom']=2.5
+	options['countrymapdots_10m']=[ (10,3,[0,1,2,3]) ]
 	return options
 
-def mauritius_options():
-	options={'gsg':'MUS.MUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Mauritius locator'}
+def mauritius_options(param):
+	if param.endswith('/'): return options_global.basic(param,'mauritius','MUS.MUS',isdisputed=True)
+	options={'gsg':'MUS.MUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Mauritius locator'
+	options['countrymap_title']='Mauritius countrymap'
 	options['presence']=['10m','50m'] 
 	options['moredots_10m']=[ (10,3,[0,1,2]) ]
+	options['countryzoom']=5
+	options['countrymapdots_10m']=[ (10,3,[0,1,2]) ]
+	if 'disputed' in param:
+		options['moredots_10m']=[]
+		options['disputed_border']=[ "FR1.ATF.Tromelin I.", "GB1.IOT.Br. Indian Ocean Ter.", "GB1.IOT.Diego Garcia NSF", ]
 	return options
 
-def comoros_options():
-	options={'gsg':'COM.COM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Comoros locator'}
+def comoros_options(param):
+	if param.endswith('/'): return options_global.basic(param,'comoros','COM.COM',isdisputed=True)
+	options={'gsg':'COM.COM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Comoros locator'
+	options['countrymap_title']='Comoros countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7664,10 +10359,16 @@ def comoros_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (20,True,[0]) ]
 	options['centerdot']=(20,3)
+	options['countryzoom']=16
+	if 'disputed' in param:
+		options['disputed_border']=[ "FR1.FRA.Mayotte", ]
 	return options
 
-def saotomeandprincipe_options():
-	options={'gsg':'STP.STP','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'São Tomé and Principe locator'}
+def saotomeandprincipe_options(param):
+	if param.endswith('/'): return options_global.basic(param,'saotomeandprincipe')
+	options={'gsg':'STP.STP','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='São Tomé and Principe locator'
+	options['countrymap_title']='São Tomé and Principe countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7675,10 +10376,14 @@ def saotomeandprincipe_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=16
 	return options
 
-def caboverde_options():
-	options={'gsg':'CPV.CPV','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,'title':'Cabo Verde locator'}
+def caboverde_options(param):
+	if param.endswith('/'): return options_global.basic(param,'caboverde')
+	options={'gsg':'CPV.CPV','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':-30,}
+	options['locatormap_title']='Cabo Verde locator'
+	options['countrymap_title']='Cabo Verde countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7686,10 +10391,15 @@ def caboverde_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (30,True,[5]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=25
 	return options
 
-def malta_options():
-	options={'gsg':'MLT.MLT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Malta locator'}
+def malta_options(param):
+	if param.endswith('/'): return options_global.basic(param,'malta')
+	options={'gsg':'MLT.MLT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Malta locator'
+	options['countrymap_title']='Malta countrymap'
+	options['euromap_title']='Malta euromap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7698,20 +10408,28 @@ def malta_options():
 	options['moredots_10m']=[ (30,4,[0]) ]
 	options['euromapdots_50m']= [('MLT.MLT',24,False,[0]) ]
 #	options['ispartlabels']=True
+	options['countryzoom']=200
 	return options
 
-def jersey_options():
-	options={'gsg':'GB1.JEY','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Jersey locator'}
+def jersey_options(param):
+	if param.endswith('/'): return options_global.basic(param,'jersey')
+	options={'gsg':'GB1.JEY','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Jersey locator'
+	options['countrymap_title']='Jersey countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=10
 	options['iszoom34']=True
 	options['moredots_10m']=[ (30,3,[0]) ]
+	options['countryzoom']=100
 	return options
 
-def guernsey_options():
-	options={'gsg':'GB1.GGY','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Guernsey locator'}
+def guernsey_options(param):
+	if param.endswith('/'): return options_global.basic(param,'guernsey')
+	options={'gsg':'GB1.GGY','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Guernsey locator'
+	options['countrymap_title']='Guernsey countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7719,47 +10437,68 @@ def guernsey_options():
 	options['iszoom34']=True
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,3)
+	options['countryzoom']=100
 	return options
 
-def isleofman_options():
-	options={'gsg':'GB1.IMN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Isle of Man locator'}
+def isleofman_options(param):
+	if param.endswith('/'): return options_global.basic(param,'isleofman')
+	options={'gsg':'GB1.IMN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Isle of Man locator'
+	options['countrymap_title']='Isle of Man countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=10
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,4,[0]) ]
+	options['countryzoom']=80
 	return options
 
-def aland_options():
-	options={'gsg':'FI1.ALD','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Aland locator'}
+def aland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'aland')
+	options={'gsg':'FI1.ALD','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Aland locator'
+	options['countrymap_title']='Aland countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=10
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,True)
+	options['countryzoom']=64
 	return options
 
-def faroeislands_options():
-	options={'gsg':'DN1.FRO','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Faroe Islands locator'}
+def faroeislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'faroeislands')
+	options={'gsg':'DN1.FRO','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Faroe Islands locator'
+	options['countrymap_title']='Faroe Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 #	options['moredots_10m']=[ (30,True,[0]) ]
 	options['centerdot']=(30,True)
+	options['countryzoom']=80
 	return options
 
-def indianoceanterritories_options():
-	options={'gsg':'AU1.IOA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Indian Ocean Territories locator'}
+def indianoceanterritories_options(param):
+	if param.endswith('/'): return options_global.basic(param,'indianoceanterritories')
+	options={'gsg':'AU1.IOA','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Indian Ocean Territories locator'
+	options['countrymap_title']='Indian Ocean Territories countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['moredots_10m']=[ (10,True,[0,2]) ]
+	options['countryzoom']=10
+	options['countrymapdots_10m']=[ (10,True,[0,2]) ]
 	return options
 
-def britishindianoceanterritory_options():
-	options={'gsg':'GB1.IOT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'British Indian Ocean Territory locator'}
+def britishindianoceanterritory_options(param):
+	if param.endswith('/'): return options_global.basic(param,'britishindianoceanterritory')
+	options={'gsg':'GB1.IOT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='British Indian Ocean Territory locator'
+	options['countrymap_title']='British Indian Ocean Territory countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 #	options['moredots_10m']=[ (40,False,[5]) ]
@@ -7767,30 +10506,43 @@ def britishindianoceanterritory_options():
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['iszoom34']=True
+	options['countryzoom']=32
+#	options['countrymapdots_10m']=[ (10,False,[0,1,2,3,4,5,6,7,8,9]) ]
 	return options
 
-def singapore_options():
-	options={'gsg':'SGP.SGP','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Singapore locator'}
+def singapore_options(param):
+	if param.endswith('/'): return options_global.basic(param,'singapore')
+	options={'gsg':'SGP.SGP','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Singapore locator'
+	options['countrymap_title']='Singapore countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['moredots_10m']=[ (20,True,[0]) ]
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['iszoom34']=True
+	options['countryzoom']=64
 	return options
 
-def norfolkisland_options():
-	options={'gsg':'AU1.NFK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Norfolk Island locator'}
+def norfolkisland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'norfolkisland')
+	options={'gsg':'AU1.NFK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Norfolk Island locator'
+	options['countrymap_title']='Norfolk Island countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=64
 	options['iszoom34']=True
 	options['moredots_10m']=[ (20,True,[0]) ]
+	options['countryzoom']=512
 	return options
 
-def cookislands_options():
-	options={'gsg':'NZ1.COK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Cook Islands locator'}
+def cookislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'cookislands')
+	options={'gsg':'NZ1.COK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Cook Islands locator'
+	options['countrymap_title']='Cook Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7798,10 +10550,15 @@ def cookislands_options():
 	options['iszoom34']=True
 	options['moredots_10m']=[ (10,2,[0,1,2,3,4,5,6,7,8,9,10,11,12]) ]
 	options['zoomdots_10m']=[ (5,False,[0,1,2,3,4,5,6,7,8,9,10,11,12]) ]
+	options['countryzoom']=6.25
+#	options['countrymapdots_10m']=[ (5,False,[0,1,2,3,4,5,6,7,8,9,10,11,12]) ]
 	return options
 
-def tonga_options():
-	options={'gsg':'TON.TON','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Tonga locator'}
+def tonga_options(param):
+	if param.endswith('/'): return options_global.basic(param,'tonga')
+	options={'gsg':'TON.TON','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Tonga locator'
+	options['countrymap_title']='Tonga countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7810,58 +10567,82 @@ def tonga_options():
 	options['centerdot']=(40,3)
 #	options['moredots_10m']=[ (40,False,[0]) ]
 	options['zoomdots_10m']=[ (5,False,[0,1,2,3,4,5,6,7,8,9]) ]
+	options['countryzoom']=12.5
 	return options
 
-def wallisandfutuna_options():
-	options={'gsg':'FR1.WLF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Wallis and Futuna locator'}
+def wallisandfutuna_options(param):
+	if param.endswith('/'): return options_global.basic(param,'wallisandfutuna')
+	options={'gsg':'FR1.WLF','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Wallis and Futuna locator'
+	options['countrymap_title']='Wallis and Futuna countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=True
 	options['moredots_10m']=[ (10,3,[0,1]) ]
+	options['countryzoom']=32
 	return options
 
-def samoa_options():
-	options={'gsg':'WSM.WSM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Samoa locator'}
+def samoa_options(param):
+	if param.endswith('/'): return options_global.basic(param,'samoa')
+	options={'gsg':'WSM.WSM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Samoa locator'
+	options['countrymap_title']='Samoa countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
+	options['countryzoom']=16
 	return options
 
-def solomonislands_options():
-	options={'gsg':'SLB.SLB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Solomon Islands locator'}
+def solomonislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'solomonislands')
+	options={'gsg':'SLB.SLB','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Solomon Islands locator'
+	options['countrymap_title']='Solomon Islands countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['centerdot']=(70,3)
+	options['countryzoom']=5
 	return options
 
-def tuvalu_options():
-	options={'gsg':'TUV.TUV','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Tuvalu locator'}
+def tuvalu_options(param):
+	if param.endswith('/'): return options_global.basic(param,'tuvalu')
+	options={'gsg':'TUV.TUV','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Tuvalu locator'
+	options['countrymap_title']='Tuvalu countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
 	options['zoomscale']=5
 	options['iszoom34']=True
 	options['centerdot']=(30,3)
+	options['countryzoom']=16
 	return options
 
-def maldives_options():
-	options={'gsg':'MDV.MDV','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Maldives locator'}
+def maldives_options(param):
+	if param.endswith('/'): return options_global.basic(param,'maldives')
+	options={'gsg':'MDV.MDV','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Maldives locator'
+	options['countrymap_title']='Maldives countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['centerdot']=(45,3)
+	options['countryzoom']=8
 	return options
 
-def nauru_options():
-	options={'gsg':'NRU.NRU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Nauru locator'}
+def nauru_options(param):
+	if param.endswith('/'): return options_global.basic(param,'nauru')
+	options={'gsg':'NRU.NRU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Nauru locator'
+	options['countrymap_title']='Nauru countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7869,45 +10650,68 @@ def nauru_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,3)
 	options['zoomdots_10m']=[ (15,False,[0]) ]
+	options['countryzoom']=1024
 	return options
 
-def federatedstatesofmicronesia_options():
-	options={'gsg':'FSM.FSM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,'title':'Federated States of Micronesia locator'}
+def federatedstatesofmicronesia_options(param):
+	if param.endswith('/'): return options_global.basic(param,'federatedstatesofmicronesia')
+	options={'gsg':'FSM.FSM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,}
+	options['locatormap_title']='Federated States of Micronesia locator'
+	options['countrymap_title']='Federated States of Micronesia countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	dots=[]
 	for i in range(20): dots.append(i)
 	options['moredots_10m']=[ (7,2,dots) ]
+	options['countryzoom']=2.5
+	options['countrymapdots_10m']=[ (4,2,dots) ]
 	return options
 
-def southgeorgiaandtheislands_options():
-	options={'gsg':'GB1.SGS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':0,'title':'South Georgia and the Islands locator'}
+def southgeorgiaandtheislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'southgeorgiaandtheislands')
+	options={'gsg':'GB1.SGS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':0,}
+	options['locatormap_title']='South Georgia and the Islands locator'
+	options['countrymap_title']='South Georgia and the Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['centerdot']=(50,4)
+	options['countryzoom']=12.5
 	return options
 
-def falklandislands_options():
-	options={'gsg':'GB1.FLK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,'title':'Falkland Islands locator'}
+def falklandislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'falklandislands')
+	options={'gsg':'GB1.FLK','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
+	options['locatormap_title']='Falkland Islands locator'
+	options['countrymap_title']='Falkland Islands countrymap'
 	options['iszoom']=True
 	options['zoomscale']=4
 	options['iszoom34']=True
 	options['centerdot']=(25,True)
+	options['countryzoom']=32
 	return options
 
-def vanuatu_options():
-	options={'gsg':'VUT.VUT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Vanuatu locator'}
+def vanuatu_options(param):
+	if param.endswith('/'): return options_global.basic(param,'vanuatu','VUT.VUT',isdisputed=True)
+	options={'gsg':'VUT.VUT','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Vanuatu locator'
+	options['countrymap_title']='Vanuatu countrymap'
 	options['iszoom']=True
 	options['zoomscale']=2
 	options['iszoom34']=True
 	options['centerdot']=(40,3)
+	options['countryzoom']=8
+	if 'disputed' in param:
+		options['disputed_border']=[ "FR1.NCL.Matthew and Hunter Is.", ]
 	return options
 
-def niue_options():
-	options={'gsg':'NZ1.NIU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Niue locator'}
+def niue_options(param):
+	if param.endswith('/'): return options_global.basic(param,'niue')
+	options={'gsg':'NZ1.NIU','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Niue locator'
+	options['countrymap_title']='Niue countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7915,10 +10719,14 @@ def niue_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
 	options['zoomdots_10m']=[ (15,False,[0]) ]
+	options['countryzoom']=400
 	return options
 
-def americansamoa_options():
-	options={'gsg':'US1.ASM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'American Samoa locator'}
+def americansamoa_options(param):
+	if param.endswith('/'): return options_global.basic(param,'americansamoa','US1.ASM',isdisputed=True)
+	options={'gsg':'US1.ASM','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='American Samoa locator'
+	options['countrymap_title']='American Samoa countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7926,10 +10734,18 @@ def americansamoa_options():
 	options['iszoom34']=True
 	options['centerdot']=(30,3)
 	options['zoomdots_10m']=[ (10,False,[0,1,2,3,4]) ]
+	options['countryzoom']=20
+	options['countrymapdots_10m']=[ (10,False,[2,4]) ]
+	if 'disputed' in param:
+		options['zoomdots_10m']=[]
+		options['disputed_border']=[ "US1.ASM.Swains Island", ]
 	return options
 
-def palau_options():
-	options={'gsg':'PLW.PLW','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,'title':'Palau locator'}
+def palau_options(param):
+	if param.endswith('/'): return options_global.basic(param,'palau')
+	options={'gsg':'PLW.PLW','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,}
+	options['locatormap_title']='Palau locator'
+	options['countrymap_title']='Palau countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7937,10 +10753,15 @@ def palau_options():
 	options['iszoom34']=True
 	options['centerdot']=(40,3)
 	options['zoomdots_10m']=[ (8,False,[0,1,2,3,4,5,6,7,8]) ]
+	options['countryzoom']=12.5
+	options['countrymapdots_10m']=[ (8,False,[4,5,7]) ]
 	return options
 
-def guam_options():
-	options={'gsg':'US1.GUM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,'title':'Guam locator'}
+def guam_options(param):
+	if param.endswith('/'): return options_global.basic(param,'guam')
+	options={'gsg':'US1.GUM','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,}
+	options['locatormap_title']='Guam locator'
+	options['countrymap_title']='Guam countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7948,10 +10769,14 @@ def guam_options():
 	options['iszoom34']=True
 	options['centerdot']=(30,3)
 	options['zoomdots_10m']=[ (7,False,[0]) ]
+	options['countryzoom']=64
 	return options
 
-def northernmarianaislands_options():
-	options={'gsg':'US1.MNP','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,'title':'Northern Mariana Islands locator'}
+def northernmarianaislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'northernmarianaislands')
+	options={'gsg':'US1.MNP','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':180,}
+	options['locatormap_title']='Northern Mariana Islands locator'
+	options['countrymap_title']='Northern Mariana Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -7959,20 +10784,28 @@ def northernmarianaislands_options():
 	options['iszoom34']=True
 	options['centerdot']=(40,3)
 	options['zoomdots_10m']=[ (4,False,[0,1,2,3,4,5,6,7,8,9,10,11]) ]
+	options['countryzoom']=10
 	return options
 
-def bahrain_options():
-	options={'gsg':'BHR.BHR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,'title':'Bahrain locator'}
+def bahrain_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bahrain')
+	options={'gsg':'BHR.BHR','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':50,}
+	options['locatormap_title']='Bahrain locator'
+	options['countrymap_title']='Bahrain countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=8
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
+	options['countryzoom']=80
 	return options
 
-def coralseaislands_options():
-	options={'gsg':'AU1.CSI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Coral Sea Islands locator'}
+def coralseaislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'coralseaislands')
+	options={'gsg':'AU1.CSI','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Coral Sea Islands locator'
+	options['countrymap_title']='Coral Sea Islands countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
@@ -7980,10 +10813,15 @@ def coralseaislands_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
 	options['zoomdots_10m']=[ (10,False,[0]) ]
+	options['countryzoom']=4
+	options['countrymapdots_10m']=[ (10,False,[0]) ]
 	return options
 
-def spratlyislands_options():
-	options={'gsg':'PGA.PGA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':175,'title':'Spratly Islands locator'}
+def spratlyislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'spratlyislands')
+	options={'gsg':'PGA.PGA','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':175,}
+	options['locatormap_title']='Spratly Islands locator'
+	options['countrymap_title']='Spratly Islands countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
@@ -7991,10 +10829,14 @@ def spratlyislands_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,3)
 	options['zoomdots_10m']=[ (4,False,[0,1,2,3,4,5,6,7,8,9,10,11]) ]
+	options['countryzoom']=40
 	return options
 
-def clippertonisland_options():
-	options={'gsg':'FR1.CLP','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-130,'title':'Clipperton Island locator'}
+def clippertonisland_options(param):
+	if param.endswith('/'): return options_global.basic(param,'clippertonisland')
+	options={'gsg':'FR1.CLP','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-130,}
+	options['locatormap_title']='Clipperton Island locator'
+	options['countrymap_title']='Clipperton Island countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['iszoom']=True
@@ -8002,20 +10844,30 @@ def clippertonisland_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,3)
 	options['zoomdots_10m']=[ (10,False,[0]) ]
+	options['countryzoom']=4
+	options['countrymapdots_10m']=[ (10,False,[0]) ]
+# countrymap is weak
 	return options
 
-def macaosar_options():
-	options={'gsg':'CH1.MAC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,'title':'Macao S.A.R locator'}
+def macaosar_options(param):
+	if param.endswith('/'): return options_global.basic(param,'macaosar')
+	options={'gsg':'CH1.MAC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':90,}
+	options['locatormap_title']='Macao S.A.R locator'
+	options['countrymap_title']='Macao S.A.R countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
 	options['zoomscale']=32
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
+	options['countryzoom']=160
 	return options
 
-def ashmoreandcartierislands_options():
-	options={'gsg':'AU1.ATC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,'title':'Ashmore and Cartier Islands locator'}
+def ashmoreandcartierislands_options(param):
+	if param.endswith('/'): return options_global.basic(param,'ashmoreandcartierislands')
+	options={'gsg':'AU1.ATC','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
+	options['locatormap_title']='Ashmore and Cartier Islands locator'
+	options['countrymap_title']='Ashmore and Cartier Islands countrymap'
 	options['presence']=['10m','50m'] 
 	options['isfullhighlight']=False
 	options['iszoom']=True
@@ -8023,10 +10875,15 @@ def ashmoreandcartierislands_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
 	options['zoomdots_10m']=[ (10,False,[0]) ]
+	options['countryzoom']=1024
+# countrymap is weak
 	return options
 
-def bajonuevobank_options():
-	options={'gsg':'BJN.BJN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Bajo Nuevo Bank (Petrel Is.) locator'}
+def bajonuevobank_options(param):
+	if param.endswith('/'): return options_global.basic(param,'bajonuevobank')
+	options={'gsg':'BJN.BJN','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Bajo Nuevo Bank (Petrel Is.) locator'
+	options['countrymap_title']='Bajo Nuevo Bank (Petrel Is.) countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['issubland']=False
@@ -8035,10 +10892,16 @@ def bajonuevobank_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
 	options['zoomdots_10m']=[ (10,False,[0]) ]
+	options['countryzoom']=10
+	options['countrymapdots_10m']=[ (10,False,[0]) ]
+# countrymap is weak
 	return options
 
-def serranillabank_options():
-	options={'gsg':'SER.SER','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,'title':'Serranilla Bank locator'}
+def serranillabank_options(param):
+	if param.endswith('/'): return options_global.basic(param,'serranillabank')
+	options={'gsg':'SER.SER','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
+	options['locatormap_title']='Serranilla Bank locator'
+	options['countrymap_title']='Serranilla Bank countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 	options['issubland']=False
@@ -8047,10 +10910,17 @@ def serranillabank_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
 	options['zoomdots_10m']=[ (10,False,[0]) ]
+	options['countryzoom']=10
+	options['countrymapdots_10m']=[ (10,False,[0]) ]
+# countrymap is weak
 	return options
+# the whole thing is disputed
 
-def scarboroughreef_options():
-	options={'gsg':'SCR.SCR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':180,'title':'Scarborough Reef locator'}
+def scarboroughreef_options(param):
+	if param.endswith('/'): return options_global.basic(param,'scarboroughreef')
+	options={'gsg':'SCR.SCR','isinsetleft':True,'lonlabel_lat':-10,'latlabel_lon':180,}
+	options['locatormap_title']='Scarborough Reef locator'
+	options['countrymap_title']='Scarborough Reef countrymap'
 	options['presence']=['10m']
 	options['isfullhighlight']=True
 #	options['ispartlabels']=True
@@ -8060,302 +10930,25 @@ def scarboroughreef_options():
 	options['iszoom34']=True
 	options['centerdot']=(20,True)
 	options['zoomdots_10m']=[ (10,False,[0]) ]
+	options['countryzoom']=10
+	options['countrymapdots_10m']=[ (10,False,[0]) ]
+# countrymap is weak
 	return options
-
-def addregionoptions(dest):
-#	dest.append( ('x',scarboroughreef_options) )
-
-	dest.append( ('indonesia',indonesia_options) )
-	dest.append( ('malaysia',malaysia_options) )
-	dest.append( ('chile',chile_options) )
-	dest.append( ('bolivia',bolivia_options) )
-	dest.append( ('peru',peru_options) )
-	dest.append( ('argentina',argentina_options) )
-	dest.append( ('dhekelia',dhekelia_options) )
-	dest.append( ('cyprus',cyprus_options) )
-	dest.append( ('cyprus_disputed',cyprus_disputed_options) )
-	dest.append( ('cyprusfull',cyprusfull_options) )
-	dest.append( ('india',india_options) )
-	dest.append( ('india_disputed',india_disputed_options) )
-	dest.append( ('china',china_options) )
-	dest.append( ('china_disputed',china_disputed_options) )
-
-	dest.append( ('israel',israel_options) )
-	dest.append( ('israel_disputed',israel_disputed_options) )
-	dest.append( ('palestine',palestine_options) )
-	dest.append( ('lebanon', lebanon_options) )
-	dest.append( ('lebanon_disputed', lebanon_disputed_options) )
-	dest.append( ('ethiopia', ethiopia_options) )
-	dest.append( ('southsudan', southsudan_options) )
-	dest.append( ('southsudan_disputed', southsudan_disputed_options) )
-	dest.append( ('somalia', somalia_options) )
-	dest.append( ('somalia_disputed', somalia_disputed_options) )
-	dest.append( ('kenya', kenya_options) )
-	dest.append( ('kenya_disputed', kenya_disputed_options) )
-	dest.append( ('pakistan', pakistan_options) )
-	dest.append( ('pakistan_disputed', pakistan_disputed_options) )
-	dest.append( ('malawi', malawi_options) )
-	dest.append( ('unitedrepublicoftanzania', unitedrepublicoftanzania_options) )
-	dest.append( ('syria', syria_options) )
-	dest.append( ('somaliland', somaliland_options) )
-	dest.append( ('france', france_options) )
-	dest.append( ('france_disputed', france_disputed_options) )
-	dest.append( ('suriname', suriname_options) )
-	dest.append( ('suriname_disputed', suriname_disputed_options) )
-	dest.append( ('guyana', guyana_options) )
-	dest.append( ('guyana_disputed', guyana_disputed_options) )
-	dest.append( ('southkorea', southkorea_options) )
-	dest.append( ('northkorea', northkorea_options) )
-	dest.append( ('morocco', morocco_options) )
-	dest.append( ('morocco_disputed', morocco_disputed_options) )
-	dest.append( ('westernsahara', westernsahara_options) )
-	dest.append( ('westernsahara_disputed', westernsahara_disputed_options) )
-	dest.append( ('costarica', costarica_options) )
-	dest.append( ('nicaragua', nicaragua_options) )
-	dest.append( ('republicofthecongo', republicofthecongo_options) )
-	dest.append( ('democraticrepublicofthecongo', democraticrepublicofthecongo_options) )
-	dest.append( ('bhutan', bhutan_options) )
-	dest.append( ('ukraine', ukraine_options) )
-	dest.append( ('ukraine_disputed', ukraine_disputed_options) )
-	dest.append( ('belarus', belarus_options) )
-	dest.append( ('namibia', namibia_options) )
-	dest.append( ('southafrica', southafrica_options) )
-	dest.append( ('saintmartin', saintmartin_options) )
-	dest.append( ('sintmaarten', sintmaarten_options) )
-	dest.append( ('oman', oman_options) )
-	dest.append( ('uzbekistan', uzbekistan_options) )
-	dest.append( ('kazakhstan', kazakhstan_options) )
-	dest.append( ('tajikistan', tajikistan_options) )
-	dest.append( ('lithuania', lithuania_options) )
-
-	dest.append( ('brazil',brazil_options) )
-	dest.append( ('uruguay', uruguay_options) )
-	dest.append( ('mongolia', mongolia_options) )
-	dest.append( ('russia', russia_options) )
-	dest.append( ('russia_disputed', russia_disputed_options) )
-	dest.append( ('czechia', czechia_options) )
-	dest.append( ('germany', germany_options) )
-	dest.append( ('estonia', estonia_options) )
-	dest.append( ('latvia', latvia_options) )
-	dest.append( ('norway', norway_options) )
-	dest.append( ('sweden', sweden_options) )
-	dest.append( ('finland', finland_options) )
-	dest.append( ('vietnam',vietnam_options) )
-	dest.append( ('cambodia', cambodia_options) )
-	dest.append( ('luxembourg', luxembourg_options) )
-	dest.append( ('unitedarabemirates', unitedarabemirates_options) )
-	dest.append( ('belgium', belgium_options) )
-	dest.append( ('georgia', georgia_options) )
-	dest.append( ('georgia_disputed', georgia_disputed_options) )
-	dest.append( ('macedonia', macedonia_options) )
-	dest.append( ('albania', albania_options) )
-	dest.append( ('azerbaijan', azerbaijan_options) )
-	dest.append( ('azerbaijan_disputed', azerbaijan_disputed_options) )
-	dest.append( ('kosovo', kosovo_options) )
-	dest.append( ('turkey', turkey_options) )
-	dest.append( ('spain', spain_options) )
-	dest.append( ('laos',laos_options) )
-	dest.append( ('kyrgyzstan', kyrgyzstan_options) )
-	dest.append( ('armenia', armenia_options) )
-	dest.append( ('denmark', denmark_options) )
-	dest.append( ('libya', libya_options) )
-	dest.append( ('tunisia', tunisia_options) )
-	dest.append( ('romania', romania_options) )
-	dest.append( ('hungary', hungary_options) )
-	dest.append( ('slovakia', slovakia_options) )
-	dest.append( ('poland', poland_options) )
-	dest.append( ('ireland', ireland_options) )
-	dest.append( ('unitedkingdom', unitedkingdom_options) )
-	dest.append( ('greece', greece_options) )
-	dest.append( ('zambia', zambia_options) )
-	dest.append( ('sierraleone', sierraleone_options) )
-	dest.append( ('guinea', guinea_options) )
-	dest.append( ('liberia', liberia_options) )
-	dest.append( ('centralafricanrepublic', centralafricanrepublic_options) )
-	dest.append( ('sudan', sudan_options) )
-	dest.append( ('sudan_disputed', sudan_disputed_options) )
-	dest.append( ('djibouti', djibouti_options) )
-	dest.append( ('eritrea', eritrea_options) )
-	dest.append( ('austria', austria_options) )
-	dest.append( ('iraq', iraq_options) )
-	dest.append( ('italy', italy_options) )
-	dest.append( ('switzerland', switzerland_options) )
-	dest.append( ('iran', iran_options) )
-	dest.append( ('netherlands', netherlands_options) )
-	dest.append( ('liechtenstein', liechtenstein_options) )
-	dest.append( ('ivorycoast', ivorycoast_options) )
-	dest.append( ('republicofserbia', republicofserbia_options) )
-	dest.append( ('mali', mali_options) )
-	dest.append( ('senegal', senegal_options) )
-	dest.append( ('nigeria', nigeria_options) )
-	dest.append( ('benin', benin_options) )
-	dest.append( ('angola', angola_options) )
-	dest.append( ('croatia', croatia_options) )
-	dest.append( ('slovenia', slovenia_options) )
-	dest.append( ('qatar', qatar_options) )
-	dest.append( ('saudiarabia', saudiarabia_options) )
-	dest.append( ('botswana', botswana_options) )
-	dest.append( ('zimbabwe', zimbabwe_options) )
-	dest.append( ('bulgaria', bulgaria_options) )
-	dest.append( ('thailand', thailand_options) )
-	dest.append( ('sanmarino', sanmarino_options) )
-	dest.append( ('haiti', haiti_options) )
-	dest.append( ('dominicanrepublic', dominicanrepublic_options) )
-	dest.append( ('chad', chad_options) )
-	dest.append( ('kuwait', kuwait_options) )
-	dest.append( ('elsalvador', elsalvador_options) )
-	dest.append( ('guatemala', guatemala_options) )
-	dest.append( ('easttimor', easttimor_options) )
-	dest.append( ('brunei', brunei_options) )
-	dest.append( ('monaco', monaco_options) )
-	dest.append( ('algeria', algeria_options) )
-	dest.append( ('mozambique', mozambique_options) )
-	dest.append( ('eswatini', eswatini_options) )
-	dest.append( ('burundi', burundi_options) )
-	dest.append( ('rwanda', rwanda_options) )
-	dest.append( ('myanmar', myanmar_options) )
-	dest.append( ('bangladesh', bangladesh_options) )
-	dest.append( ('andorra', andorra_options) )
-	dest.append( ('afghanistan', afghanistan_options) )
-	dest.append( ('montenegro', montenegro_options) )
-	dest.append( ('bosniaandherzegovina', bosniaandherzegovina_options) )
-	dest.append( ('uganda', uganda_options) )
-	dest.append( ('usnavalbaseguantanamobay', usnavalbaseguantanamobay_options) )
-	dest.append( ('cuba', cuba_options) )
-	dest.append( ('honduras', honduras_options) )
-	dest.append( ('ecuador', ecuador_options) )
-	dest.append( ('colombia', colombia_options) )
-	dest.append( ('paraguay', paraguay_options) )
-	dest.append( ('portugal', portugal_options) )
-	dest.append( ('moldova', moldova_options) )
-	dest.append( ('moldova_disputed', moldova_disputed_options) )
-	dest.append( ('turkmenistan', turkmenistan_options) )
-	dest.append( ('jordan', jordan_options) )
-	dest.append( ('nepal', nepal_options) )
-	dest.append( ('lesotho', lesotho_options) )
-	dest.append( ('cameroon', cameroon_options) )
-	dest.append( ('gabon', gabon_options) )
-	dest.append( ('niger', niger_options) )
-	dest.append( ('burkinafaso', burkinafaso_options) )
-	dest.append( ('togo', togo_options) )
-	dest.append( ('ghana', ghana_options) )
-	dest.append( ('guineabissau', guineabissau_options) )
-	dest.append( ('gibraltar', gibraltar_options) )
-	dest.append( ('unitedstatesofamerica', unitedstatesofamerica_options) )
-	dest.append( ('canada', canada_options) )
-	dest.append( ('mexico', mexico_options) )
-	dest.append( ('belize', belize_options) )
-	dest.append( ('panama', panama_options) )
-	dest.append( ('venezuela', venezuela_options) )
-	dest.append( ('papuanewguinea', papuanewguinea_options) )
-	dest.append( ('egypt', egypt_options) )
-	dest.append( ('yemen', yemen_options) )
-	dest.append( ('mauritania', mauritania_options) )
-	dest.append( ('equatorialguinea', equatorialguinea_options) )
-	dest.append( ('gambia', gambia_options) )
-	dest.append( ('hongkongsar', hongkongsar_options) )
-	dest.append( ('vatican', vatican_options) )
-	dest.append( ('northerncyprus', northerncyprus_options) )
-	dest.append( ('cyprusnomansarea', cyprusnomansarea_options) )
-	dest.append( ('siachenglacier', siachenglacier_options) )
-	dest.append( ('baykonurcosmodrome', baykonurcosmodrome_options) )
-	dest.append( ('akrotirisovereignbasearea', akrotirisovereignbasearea_options) )
-	dest.append( ('antarctica', antarctica_options) )
-	dest.append( ('australia', australia_options) )
-	dest.append( ('greenland', greenland_options) )
-	dest.append( ('fiji', fiji_options) )
-	dest.append( ('newzealand', newzealand_options) )
-	dest.append( ('newcaledonia', newcaledonia_options) )
-	dest.append( ('madagascar', madagascar_options) )
-	dest.append( ('philippines', philippines_options) )
-	dest.append( ('srilanka', srilanka_options) )
-	dest.append( ('curacao', curacao_options) )
-	dest.append( ('aruba', aruba_options) )
-	dest.append( ('thebahamas', thebahamas_options) )
-	dest.append( ('turksandcaicosislands', turksandcaicosislands_options) )
-	dest.append( ('taiwan', taiwan_options) )
-	dest.append( ('japan', japan_options) )
-	dest.append( ('japan_disputed', japan_disputed_options) )
-	dest.append( ('saintpierreandmiquelon', saintpierreandmiquelon_options) )
-	dest.append( ('iceland', iceland_options) )
-	dest.append( ('pitcairnislands', pitcairnislands_options) )
-	dest.append( ('frenchpolynesia', frenchpolynesia_options) )
-	dest.append( ('frenchsouthernandantarcticlands', frenchsouthernandantarcticlands_options) )
-	dest.append( ('seychelles', seychelles_options) )
-	dest.append( ('kiribati', kiribati_options) )
-	dest.append( ('marshallislands', marshallislands_options) )
-	dest.append( ('trinidadandtobago', trinidadandtobago_options) )
-	dest.append( ('grenada', grenada_options) )
-	dest.append( ('saintvincentandthegrenadines', saintvincentandthegrenadines_options) )
-	dest.append( ('barbados', barbados_options) )
-	dest.append( ('saintlucia', saintlucia_options) )
-	dest.append( ('dominica', dominica_options) )
-	dest.append( ('unitedstatesminoroutlyingislands', unitedstatesminoroutlyingislands_options) )
-	dest.append( ('montserrat', montserrat_options) )
-	dest.append( ('antiguaandbarbuda', antiguaandbarbuda_options) )
-	dest.append( ('saintkittsandnevis', saintkittsandnevis_options) )
-	dest.append( ('unitedstatesvirginislands', unitedstatesvirginislands_options) )
-	dest.append( ('saintbarthelemy', saintbarthelemy_options) )
-	dest.append( ('puertorico', puertorico_options) )
-	dest.append( ('anguilla', anguilla_options) )
-	dest.append( ('britishvirginislands', britishvirginislands_options) )
-	dest.append( ('jamaica', jamaica_options) )
-	dest.append( ('caymanislands', caymanislands_options) )
-	dest.append( ('bermuda', bermuda_options) )
-	dest.append( ('heardislandandmcdonaldislands', heardislandandmcdonaldislands_options) )
-	dest.append( ('sainthelena', sainthelena_options) )
-	dest.append( ('mauritius', mauritius_options) )
-	dest.append( ('comoros', comoros_options) )
-	dest.append( ('saotomeandprincipe', saotomeandprincipe_options) )
-	dest.append( ('caboverde', caboverde_options) )
-	dest.append( ('malta', malta_options) )
-	dest.append( ('jersey', jersey_options) )
-	dest.append( ('guernsey', guernsey_options) )
-	dest.append( ('isleofman', isleofman_options) )
-	dest.append( ('aland', aland_options) )
-	dest.append( ('faroeislands', faroeislands_options) )
-	dest.append( ('indianoceanterritories', indianoceanterritories_options) )
-	dest.append( ('britishindianoceanterritory', britishindianoceanterritory_options) )
-	dest.append( ('singapore', singapore_options) )
-	dest.append( ('norfolkisland', norfolkisland_options) )
-	dest.append( ('cookislands', cookislands_options) )
-	dest.append( ('tonga', tonga_options) )
-	dest.append( ('wallisandfutuna', wallisandfutuna_options) )
-	dest.append( ('samoa', samoa_options) )
-	dest.append( ('solomonislands', solomonislands_options) )
-	dest.append( ('tuvalu', tuvalu_options) )
-	dest.append( ('maldives', maldives_options) )
-	dest.append( ('nauru', nauru_options) )
-	dest.append( ('federatedstatesofmicronesia', federatedstatesofmicronesia_options) )
-	dest.append( ('southgeorgiaandtheislands', southgeorgiaandtheislands_options) )
-	dest.append( ('falklandislands', falklandislands_options) )
-	dest.append( ('vanuatu', vanuatu_options) )
-	dest.append( ('niue', niue_options) )
-	dest.append( ('americansamoa', americansamoa_options) )
-	dest.append( ('palau', palau_options) )
-	dest.append( ('guam', guam_options) )
-	dest.append( ('northernmarianaislands', northernmarianaislands_options) )
-	dest.append( ('bahrain', bahrain_options) )
-	dest.append( ('coralseaislands', coralseaislands_options) )
-	dest.append( ('spratlyislands', spratlyislands_options) )
-	dest.append( ('clippertonisland', clippertonisland_options) )
-	dest.append( ('macaosar', macaosar_options) )
-	dest.append( ('ashmoreandcartierislands', ashmoreandcartierislands_options) )
-	dest.append( ('bajonuevobank', bajonuevobank_options) )
-	dest.append( ('serranillabank', serranillabank_options) )
-	dest.append( ('scarboroughreef', scarboroughreef_options) )
+# the whole thing is disputed
 
 
 def runparams(params):
 	global isverbose_global
-	options={}
+	version='1.0.1'
 	overrides={}
 	output=Output()
-	regionoptions=[]
-	addregionoptions(regionoptions)
 	overrides['cmdline']='./pythonshp.py '+' '.join(params)
+	overrides['version']=version
 	locatormap_overrides={}
 	areamap_overrides={}
+	countrymap_overrides={}
+	maximap_overrides={}
+	optionpath='/'
 
 	for param in params:
 		if param=='check':
@@ -8367,8 +10960,16 @@ def runparams(params):
 		elif param=='publicdomain':
 			overrides['copyright']='COPYRIGHT: THIS SVG FILE IS RELEASED INTO THE PUBLIC DOMAIN'
 		elif param=='list':
-			regionoptions.sort()
-			for l in regionoptions: print('%s'%l[0])
+			path=optionpath
+			if not path.endswith('/'): path=path+'/'
+			regions=options_global.listoptionpath(path)
+			if regions:
+				regions.sort()
+				for l in regions: print(l[0])
+		elif param=='listall':
+			names=options_global.listall()
+			names.sort()
+			for n in names: print(n)
 		elif param=='wiki1':
 			locatormap_overrides['width']=1000
 			locatormap_overrides['height']=1000
@@ -8378,25 +10979,74 @@ def runparams(params):
 			areamap_overrides['width']=1000
 			areamap_overrides['height']=1000
 			areamap_overrides['spherem']='50m'
+			countrymap_overrides['width']=1000
+			countrymap_overrides['height']=1000
+			countrymap_overrides['spherem']='10m'
+			maximap_overrides['width']=1000
+			maximap_overrides['height']=1000
+			maximap_overrides['spherem']='10m'
+		elif param=='wiki2':
+			locatormap_overrides['width']=1000
+			locatormap_overrides['height']=1000
+			locatormap_overrides['labelfont']='14px sans'
+			locatormap_overrides['spherem']='50m'
+			locatormap_overrides['zoomm']='50m'
+			areamap_overrides['width']=1000
+			areamap_overrides['height']=1000
+			areamap_overrides['spherem']='50m'
+			countrymap_overrides['width']=1000
+			countrymap_overrides['height']=1000
+			countrymap_overrides['spherem']='10m'
+			overrides['hypso']='hypso-lr_sr_ob_dr'
+			overrides['hypso_high']='hypso-hr_sr_ob_dr'
+			overrides['hypsodim']=500
 		elif param=='notripel':
 			locatormap_overrides['istripelinset']=False
 		elif param=='bg':
 			overrides['bgcolor']='#b4b4b4'
-		elif param=='locatormap':
+		elif param=='hypso':
+			overrides['hypso']='hypso-lr_sr_ob_dr'
+			overrides['hypsodim']=500
+		elif param=='hypsofast':
+			overrides['hypso']='hypso-lr_sr_ob_dr'
+			overrides['hypsofast']=True # saves PNG with low compression, only useful while testing
+			overrides['hypsodim']=500
+		elif param=='hypsocache':
+			overrides['hypsocache']=''
+		elif param.startswith('hypsocache='):
+			overrides['hypsocache']=param[11:]
+		elif param in ('locatormap','euromap','countrymap','maximap'):
+			if optionpath.endswith('/'):
+				print('%s requires a location to be selected (%s)'%(param,optionpath),file=sys.stderr)
+				return
+			options=options_global.getoptions(optionpath)
+			if not options:
+				print('specified location does not have %s options (%s)'%(param,optionpath),file=sys.stderr)
+				return
 			for n in overrides: options[n]=overrides[n]
-			for n in locatormap_overrides: options[n]=locatormap_overrides[n]
-			locatormap(output,options)
-		elif param=='euromap':
-			for n in overrides: options[n]=overrides[n]
-			for n in areamap_overrides: options[n]=areamap_overrides[n]
-			euromap(output,options)
+			if param=='locatormap':
+				for n in locatormap_overrides: options[n]=locatormap_overrides[n]
+				locatormap(output,options)
+			elif param=='euromap':
+				for n in areamap_overrides: options[n]=areamap_overrides[n]
+				euromap(output,options)
+			elif param=='countrymap':
+				for n in countrymap_overrides: options[n]=countrymap_overrides[n]
+				countrymap(output,options)
+			elif param=='maximap':
+				for n in maximap_overrides: options[n]=maximap_overrides[n]
+				maximap(output,options)
+			output.writeto(sys.stdout)
+#			print(output.csscounts,file=sys.stderr)
 		elif param=='admin0dbf_test': admin0dbf_test()
+		elif param=='russiafix_test': russiafix_test()
 		elif param=='lakesdbf_test': lakesdbf_test()
 		elif param=='lakesintersection_test': lakesintersection_test()
 		elif param=='borderlakes_test': borderlakes_test()
 		elif param=='disputeddbf_test': disputeddbf_test()
 		elif param=='disputed_test': disputed_test()
 		elif param=='admin1dbf_test': admin1dbf_test()
+		elif param=='admin1linesdbf_test': admin1linesdbf_test()
 		elif param=='sphere_test': sphere_test()
 		elif param=='sphere2_test': sphere2_test()
 		elif param=='sphere3_test': sphere3_test()
@@ -8409,12 +11059,14 @@ def runparams(params):
 		elif param=='tripel_test': tripel_test()
 		elif param=='webmercator_test': webmercator_test()
 		elif param=='province_test': province_test()
+		elif param=='admin1_test': admin1_test()
 		elif param=='admin0info_test': admin0info_test()
 		elif param=='admin0parts_test': admin0parts_test()
 		elif param=='worldcompress_test': worldcompress_test()
 		elif param=='ccw_test': ccw_test()
+		elif param=='png_test': png_test()
 		elif param=='version' or param=='--version':
-			print('Version 1.0.0')
+			print('Version',version)
 		elif param=='help' or param=='--help':
 			print('Usage: ./pythonshp.py command1 command2 command3 ...')
 			print('Commands:')
@@ -8422,22 +11074,31 @@ def runparams(params):
 			print('\tcheck            : show file locations and enable verbose messages')
 			print('\tpublicdomain     : add PD copyright notice in output')
 			print('\twiki1            : set defaults for wikipedia, set 1')
+			print('\twiki2            : set defaults for wikipedia, set 2 (hypso)')
 			print('\tbg               : print background color (instead of transparency)')
+			print('\thypso            : print background bitmap (instead of solids)')
+			print('\thypsocache       : load/save hypso data to/from ./hypsocache/')
 			print('\tnotripel         : disable Winkel Tripel inset')
-			print('\tlist             : list known location commands')
+			print('\tlist             : list root location commands')
+			print('\tlistall          : list all location commands')
 			print('\tlocatormap       : print locator map svg')
 			print('\teuromap          : print EU map svg')
+			print('\tcountrymap       : print country map svg')
+			print('\tmaximap					: print maximal map svg')
 			print('Example 1: "./pythonshp.py verbose check"')
-			print('2: "./pythonshp.py check publicdomain wiki1 laos locatormap > laos.svg"')
-			print('3: "./pythonshp.py verbose wiki1 laos locatormap | inkscape -e laos.png -"')
+			print('2: "./pythonshp.py list"')
+			print('3: "./pythonshp.py canada/ list"')
+			print('4: "./pythonshp.py listall"')
+			print('5: "./pythonshp.py check publicdomain wiki1 laos locatormap > laos.svg"')
+			print('6: "./pythonshp.py verbose wiki1 spain euromap | inkscape -e spain.png -"')
 		else:
-			for l in regionoptions:
-				if param==l[0]:
-					options=l[1]()
-					break
-			else:
+			if param.startswith('/'): newpath=param
+			else: newpath=optionpath+'/'+param
+			if not options_global.isvalidpath(newpath):
 				print('Unknown command "%s"'%param,file=sys.stderr)
 				return
+			else:
+				optionpath=newpath
 
 if len(sys.argv)<2: runparams(['help'])
 else: runparams(sys.argv[1:])
