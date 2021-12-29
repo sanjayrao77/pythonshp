@@ -238,6 +238,10 @@ could start with sphere_test() by running:
 proceed to sphere2_test() and so on. There is a list of _test
 procedures in runparams().
 
+class AutoCenter():
+	Given several mbr values, finds the rough geometric center. It can differ
+slightly from the true center based on mbr's rotation.
+
 class AutoZoom():
 	Given shapes, this finds the best zoom level to maximize the shape in
 a rectangle. Can also trim unused space from the minor axis.
@@ -300,6 +304,12 @@ as an Intersection.
 
 class Intersections():
 	A group of class Intersection.
+
+class Label():
+	To store a single text label.
+
+class LabelMaker():
+	To create text labels and draw them. Commands come from "labels+=" options.
 
 class Mbr():
 	Minimum Bounding Rectangle. This is basic for shp file data.
