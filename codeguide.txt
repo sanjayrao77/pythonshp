@@ -8,6 +8,10 @@ a guide to understanding the python classes.
 PART 1: OPTION VARIABLES, ordered by importance
 -------------------------------------------------
 
+Many of these variables can be set on the command line with the "options+="
+command. E.g.:
+"./pythonshp.py wiki1 "options+=islakes=no&istripelinset=no" laos locatormap > map.svg"
+
 
 options['width'] = int
 	Number of pixels wide for the target image.
@@ -73,7 +77,7 @@ which area on the map. You can toggle "ispartlabeltop_global" to draw the
 labels from the bottom or top.
 	Note that this uses 10m, much like a lot of the code using part indices.
 
-options['isinsettripel'] = bool
+options['istripelinset'] = bool
 	Should the Winkel Tripel full-world map be drawn as an inset? Default is
 True.
 
@@ -280,6 +284,9 @@ class FlatPolygon():
 class FlatPolyline():
 	A polyline in x,y,z space, flattened to x,y.
 
+class FlatRectangle():
+	A rectangle in x,y,z space, flattened to x,y.
+
 class FlatShape():
 	A generic x,y,z shape, flattened to x,y.
 
@@ -421,6 +428,9 @@ class SpherePolygon():
 class SpherePolyline():
 	A polyline made of SpherePoint points.
 
+class SphereRectangle():
+	A rectangle made of SpherePoint points.
+
 class SphereRotation():
 	A lon/lat rotation of the sphere. It supports two rotations and
 stores itself as a recentering from (0,0).
@@ -445,6 +455,12 @@ class TripelPolyline():
 
 class TripelShape():
 	A generic shape in Tripel space.
+
+class UrlDecoding():
+	Decode %-encoding for options and labels.
+
+class UserOptions():
+	Manage commandline options.
 
 class WebMercatorCleave():
 	Trims shapes for WebMercator. It's necessary to trim high and low lats and
