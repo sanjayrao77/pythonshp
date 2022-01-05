@@ -254,14 +254,15 @@ Example 1: Here's an example using a specified longitude and latitude.
 Example 2: This will place a red dot on Seattle and print "Seattle" next to it.
 ```
 # pp=LOOKUP will search populated places for a label
-./pythonshp.py wiki1 unitedstatesofamerica/washington labels+=pp=seattle maximap > map.svg
+# a=-1 will position the text to the right, a=0 will place it over the dot, a=1 will place to the left
+./pythonshp.py wiki1 unitedstatesofamerica/washington labels+=a=-1 labels+=pp=seattle maximap > map.svg
 ```
 
 Example 3: This will place a red dot on Seattle and print "Seattle" to the top-right of it.
 ```
 # fx=+INT, fx=-INT, fx=INT will reposition the text x coordinate, fy for y coordinate
 # & will join multiple options but it's also possible to include multiple labels+=xx parameters
-./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=fx=+200&fy=-50&pp=seattle" maximap > map.svg
+./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=a=-1&fx=+200&fy=-50&pp=seattle" maximap > map.svg
 ```
 
 Example 4: This will place a red dot on Seattle with no text label.
@@ -272,13 +273,13 @@ Example 4: This will place a red dot on Seattle with no text label.
 
 Example 5: This will place the "Seattle" text over Seattle with no red dot.
 ```
-# h=2 will draw only the text, (h=3 will draw both text and dot)
+# h=2 will draw only the text, (h=3 will draw both text and dot, h=7 adds line)
 ./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=h=2&pp=seattle" maximap > map.svg
 ```
 
 Example 6: This is like example 2 but with text rotation.
 ```
-# r=ANGLE will rotate the text. It will also position the text by its middle-bottom instead of left-bottom.
+# r=ANGLE will rotate the text. It will also position the text by its middle-bottom, ignoring a=
 ./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=r=45&pp=seattle" maximap > map.svg
 ```
 
@@ -292,7 +293,7 @@ Example 8: This will place several labels at the same time.
 ```
 # A label is drawn whenever there's a pp= or t= option. The previous options apply until a "reset" is written.
 # Multiple labels+= commands are the same as joining commands with ampersand.
-./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=f=20px sans&r=-10&pp=seattle&pp=tacoma" "labels+=reset&f=30px sans&pp=olympia" maximap > map.svg
+./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=a=-1&f=20px sans&r=-10&pp=seattle&pp=tacoma" "labels+=reset&f=30px sans&pp=olympia" maximap > map.svg
 ```
 
 Example 9: Here's a simple lookup into the populated places database.
@@ -310,6 +311,30 @@ Example 10: Name collisions.
 ./pythonshp.py wiki1 unitedstatesofamerica/washington "labels+=pp=aberdeen" maximap > map.svg
 ```
 
+## Tweaking
+
+There are many options which govern the map drawing. Many can be accessed with the "options+="
+command line parameter.
+
+Example 1,	disabling lake drawing:
+```
+./pythonshp.py wiki1 options+=islakes=no laos locatormap > map.svg
+```
+
+Example 2, disabling Tripel inset and lake drawing:
+```
+./pythonshp.py wiki1 "options+=islakes=no&istripelinset=no" laos locatormap > map.svg
+```
+
+Example 3, enabling zoom inset:
+```
+# note that laos must come before options+=, which modify laos
+./pythonshp.py wiki1 laos "options+=iszoom=yes&zoom=4" locatormap > map.svg
+```
+
+
+Please see the codeguide.txt file for more information.
+
 ## Python code
 
 Please see _codeguide.txt_ for a description of the 'options' values and how
@@ -321,11 +346,12 @@ Currently 2 map styles are supported: wiki1 and wiki2.
 1. "wiki1" sets 1000x1000 pixel output with some simple defaults.
 1. "wiki2" is like wiki1 but adds hypsometric tints (bitmaps) to the backgrounds.
 
-Currently 4 map types are supported: locatormap, euromap, countrymap and maximap.
+Currently 5 map types are supported: locatormap, euromap, countrymap, maximap and pointmap.
 1. "locatormap" shows a sphere and is intended to identify the location of the shape in the world.
 1. "euromap" shows a map of the European Union and is intended to identify a member country.
 1. "countrymap" shows a country with its surroundings. It's intended to show State/Province/District detail.
 1. "maximap" almost-maximally zooms in on a shape to show shape detail.
+1. "pointmap" makes generic maps, given a center and zoom level.
 
 Given a map style and a map type, the only element missing to make a map is a location. Instructions follow
 to find a location name.
@@ -334,7 +360,28 @@ Once you have a location name, you can run "./pythonshp.py MAPSTYLE LOCATION MAP
 create a map. E.g.: "./pythonshp.py wiki1 laos locatormap > laos.svg"
 
 
-## Support Locations
+## Pointmap
+
+Unlike locatormap, euromap, countrymap and maximap, pointmap is for
+user-defined locations. You'll want to set lon, lat, zoom, isadmin0 and
+isadmin1 options to make "pointmap" maps.
+
+Example, simple map:
+```
+# lon: longitude of map center
+# lat: latitude of map center
+# zoom: magnification factor
+# isadmin0: yes/no, should country borders be drawn
+# isadmin1: yes/no, should province and state borders be drawn
+./pythonshp.py wiki1 "options+=lon=-122.34&lat=47.57&zoom=16&isadmin0=no&isadmin1=yes" pointmap > map.svg
+```
+
+Example, with color texture:
+```
+./pythonshp.py wiki2 "options+=lon=-122.34&lat=47.57&zoom=16&isadmin0=no&isadmin1=yes" pointmap > map.svg
+```
+
+## Supported Locations
 
 You can find a list of top-level locations by running "./pythonshp.py listall". 
 
@@ -789,7 +836,6 @@ bhutan/wangdiphodrang
 birtawil
 bolivia
 bolivia/_admin1
-bolivia/_disputed
 bolivia/chuquisaca
 bolivia/cochabamba
 bolivia/elbeni
@@ -1520,7 +1566,8 @@ finland/tavastiaproper
 finland/uusimaa
 france
 france/_admin1
-france/_disputed
+france/_disputed1
+france/_disputed2
 france/ain
 france/aisne
 france/allier
@@ -4864,7 +4911,8 @@ unitedarabemirates/sharjah
 unitedarabemirates/ummalqaywayn
 unitedkingdom
 unitedkingdom/_admin1
-unitedkingdom/_disputed
+unitedkingdom/_disputed1
+unitedkingdom/_disputed2
 unitedkingdom/aberdeen
 unitedkingdom/aberdeenshire
 unitedkingdom/anglesey
@@ -5110,7 +5158,8 @@ unitedstatesminoroutlyingislands/palmyraatoll
 unitedstatesminoroutlyingislands/wakeatoll
 unitedstatesofamerica
 unitedstatesofamerica/_admin1
-unitedstatesofamerica/_disputed
+unitedstatesofamerica/_disputed1
+unitedstatesofamerica/_disputed2
 unitedstatesofamerica/alabama
 unitedstatesofamerica/alaska
 unitedstatesofamerica/arizona
