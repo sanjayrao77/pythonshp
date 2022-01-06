@@ -35,7 +35,7 @@ try:
 except ImportError:
 	zipfile=None
 
-version_global='1.0.3'
+version_global='1.0.4'
 isverbose_global=False
 ispartlabeltop_global=True
 debug_global=0
@@ -61,11 +61,14 @@ REVERSE_CCWTYPE=1 # lakes, ccws are water
 HOLE_CCWTYPE=2 # Lesotho, hole in a shape
 CW_CCWTYPE=3 # force CW even if CCW
 CUTOUT_CCWTYPE=4
+IGNORE_CCWTYPE=5
 def ccwtype_tostring(c):
 	if c==NONE_CCWTYPE: return 'NONE'
 	if c==REVERSE_CCWTYPE: return 'REVERSE'
 	if c==HOLE_CCWTYPE: return 'HOLE'
 	if c==CW_CCWTYPE: return 'CW'
+	if c==CUTOUT_CCWTYPE: return 'CUTOUT'
+	if c==IGNORE_CCWTYPE: return 'IGNORE'
 	return 'UNK'
 
 M_PI=math.pi
@@ -563,10 +566,10 @@ class HypsoSphere():
 		crx=-(lon*M_PI)/180.0
 		cry=-(lat*M_PI)/180.0
 		self.crx=crx
-		self.rot_a=math.cos(crx);
-		self.rot_c=math.sin(crx);
-		self.rot_e=math.cos(cry);
-		self.rot_f=math.sin(cry);
+		self.rot_a=math.cos(crx)
+		self.rot_c=math.sin(crx)
+		self.rot_e=math.cos(cry)
+		self.rot_f=math.sin(cry)
 	def setzoom(self,dzr,dzt,dzw,dzh):
 		(self.dzr,self.dzt,self.dzw,self.dzh)=(dzr,dzt,dzw,dzh)
 	def draw(self,rgba):
@@ -2015,6 +2018,7 @@ class FlatShape():
 			i+=1
 			if i==len(self.polygons): break
 			pg=self.polygons[i]
+			if pg.ccwtype==IGNORE_CCWTYPE: continue
 			if cssreverse and pg.ccwtype==REVERSE_CCWTYPE:
 				hasreverse=True
 				continue
@@ -2637,12 +2641,13 @@ class TripelPolygon():
 	def print(self):
 		print('polygon: '+str(len(self.points))+' iscw:'+str(self.polygon.iscw))
 	def flatten(self,widthm1,heightm1):
-		r=FlatPolyline()
+		pg=self.polygon
+		r=FlatPolygon(pg.iscw,pg.index,pg.partindex,pg.ccwtype)
 		for p in self.points:
 			(ux,uy)=tripel(p.lon,p.lat)
 			ux=int(0.5+ux*widthm1)
 			uy=int(0.5+heightm1-uy*heightm1)
-			r.addpoint(ux,uy)
+			r.addpoint(ux,uy,NONE_PATCHTYPE)
 		return r
 
 class SpherePolyline():
@@ -5225,7 +5230,7 @@ class WorldCompress():
 				self.addtoblob('FI1.FIN')
 	def addcontinents(self,label='',isusacan=False):
 		if self.shp.installfile.scale=='10m':
-			print('Not making worldcompress for 10m: %s'%label,file=sys.stderr)
+			if isverbose_global: print('Not making worldcompress for 10m: %s'%label,file=sys.stderr)
 			return
 		if len(label): label+=' '
 		if isverbose_global: print('Creating %sblobs: '%label,end='',file=sys.stderr,flush=True)
@@ -5280,6 +5285,7 @@ def worldcompress_test():
 	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin0.fixantarctica()
 	admin0.fixrussia()
+	admin0.fixegypt()
 	admin0.setccwtypes()
 	admin0.loadlakes()
 
@@ -5506,7 +5512,7 @@ def admin0parts_test():
 	gsgs=['TTO.TTO']
 	gsgs=['ATA.ATA']
 	gsgs=['CYP.CYP','CYN.CYN']
-	gsgs=['GB1.IOT']
+	gsgs=['EGY.EGY']
 
 	sfi=install.getinstallfile('admin0-nolakes.shp',scales)
 	print('shp filename: %s'%sfi.filename)
@@ -5847,7 +5853,7 @@ class ShpAdminShape():
 						continue
 				i+=1
 
-		if isverbose_global and fixcount: print('Fixed %d points in russiafix'%fixcount,file=sys.stderr)
+		if isverbose_global and fixcount: print('Fixed %d points in fixrussia'%fixcount,file=sys.stderr)
 
 		blob=WorldBlob(mainminus)
 		if not blob.addtoblob_minus(tailminus): raise ValueError
@@ -5856,6 +5862,25 @@ class ShpAdminShape():
 			points.append(p.dll)
 		self.replacepart(partindex,points)
 		self.replacepart(tailpartindex,[])
+	@staticmethod
+	def findpointsmatch(haystack,needle):
+		lh=len(haystack)
+		for i,_ in enumerate(haystack):
+			for j,n in enumerate(needle):
+				p=haystack[(i+j)%lh]
+				if abs(p.lon-n[0])>0.000001 or abs(p.lat-n[1])>0.000001: break
+			else:
+				return i
+		return -1
+	def fixegypt(self,partindex):
+		points=self.extractpart(partindex)
+		cut=( ( 35.429207016000,22.978330157000 ), ( 35.212087686000,22.786263058000 ), ( 35.345755761060,22.901639312789 ),
+				( 35.486665384665,23.023266145732 ), ( 35.621087106000,23.139292914000 ) )
+		i=ShpAdminShape.findpointsmatch(points,cut)
+		if i<0: raise ValueError
+		del points[i:i+len(cut)] # this doesn't handle wrap-around cases
+		self.replacepart(partindex,points)
+		if isverbose_global: print('Fixed %d points in fixegypt'%len(cut),file=sys.stderr)
 
 class ShpAdminShapeIntersection():
 	def __init__(self):
@@ -5883,7 +5908,8 @@ class ShpAdminShapeIntersection():
 		for points in self.pointslist:
 			for p in points: p.side=-1
 	def setinside(self,shape):
-		mbr=shape.mbr;
+		if not self.mbr.isset: return
+		mbr=shape.mbr
 		if not self.mbr.isintersects(mbr): return
 		pluses=ShapePlus.make(shape)
 #		mbr=shape.getmbr([-1])
@@ -6094,7 +6120,7 @@ class ShpAdmin():
 	def setccwtypes(self):
 		if self.installfile.scale=='10m':
 			if self.installfile.nickname=='admin0-lakes.shp':
-				canada=self.shapes.bynickname['CAN.CAN']
+				canada=self.admin0.bynickname['CAN.CAN']
 				if canada.partscount==455:
 					lakes=[1,2,3]
 					for i in lakes: canada.ccwtypes[i]=REVERSE_CCWTYPE
@@ -6120,6 +6146,12 @@ class ShpAdmin():
 			rus.fixrussia(0,3,isfix10mpoint=True,isdebug=isdebug) # 0,3 is for nolakes, lakes is probably 0,5
 			rus.ccwtypes[0]=CW_CCWTYPE
 		else: raise ValueError
+	def fixegypt(self):
+		egy=self.bynickname['EGY.EGY']
+		if self.installfile.scale=='10m':
+			if egy.partscount!=10: raise ValueError
+			egy.fixegypt(0)
+			for i in (1,2): egy.ccwtypes[i]=IGNORE_CCWTYPE
 	def makecyprusfull(self):
 		nickname='cyprusfull'
 		names=['CYP.CYP','CNM.CNM','CYN.CYN']
@@ -6152,15 +6184,16 @@ def sphere2_test(): # test ShpAdmin
 	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin0.fixantarctica()
 	admin0.fixrussia()
+	admin0.fixegypt()
 	admin0.setccwtypes()
 
-	gsg='AU1.CSI'
+	gsg='EGY.EGY'
 	(lon,lat)=admin0.bynickname[gsg].getcenter([-1])
 	rotation.set_deglonlat(lon,lat)
-	admin0.bynickname[gsg].setdraworder(-1,1)
+#	admin0.bynickname[gsg].setdraworder(-1,1)
 	print('Center set to %f,%f'%(lon,lat),file=sys.stderr)
 
-	scale=2
+	scale=8
 	if scale==1:
 		bzc=None
 	else:
@@ -6183,8 +6216,8 @@ def sphere2_test(): # test ShpAdmin
 		one_sphere_print_svg(output,one,1,rotation,width,height,8,cssfull=LAND_SPHERE_CSS,csspatch=PATCH_LAND_SPHERE_CSS,
 				boxzoomcleave=bzc,cornercleave=cc,islabels=True)
 
-	if False:
-		dll=DegLonLat(-82.5,42.5)
+	if True:
+		dll=DegLonLat( 35.212087686000,22.786263058000 )
 		dll_sphere_print_svg(output,dll,rotation,width,height,FOUR_CIRCLE_CSS,boxzoomcleave=bzc)
 
 	print_footer_svg(output)
@@ -6201,6 +6234,7 @@ def disputed_test(): # find disputed shapes
 	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin0.fixantarctica()
 	admin0.fixrussia()
+	admin0.fixegypt()
 	admin0.setccwtypes()
 	admin0.loaddisputed(is10m=False)
 
@@ -6349,6 +6383,7 @@ def borderlakes_test(): # find lakes that intersect with borders # this is obsol
 	admin0=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin0.fixantarctica()
 	admin0.fixrussia()
+	admin0.fixegypt()
 	admin0.setccwtypes()
 	admin0.loadlakes()
 
@@ -6400,6 +6435,7 @@ def admin1_test(): # look at admin1 shapes
 	admin=ShpAdmin('admin0-nolakes.shp',[scale])
 	admin.fixantarctica()
 	admin.fixrussia()
+	admin.fixegypt()
 	admin.setccwtypes()
 	admin.loadadmin1()
 
@@ -7024,6 +7060,7 @@ def locatormap(output,overrides,labels):
 	sphere_admin0=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
 	sphere_admin0.fixantarctica()
 	sphere_admin0.fixrussia()
+	sphere_admin0.fixegypt()
 	sphere_admin0.setccwtypes()
 	sphere_admin0.loadlakes()
 
@@ -7033,6 +7070,7 @@ def locatormap(output,overrides,labels):
 		zoom_admin0=ShpAdmin('admin0-nolakes.shp',[options['zoomm']])
 		zoom_admin0.fixantarctica()
 		zoom_admin0.fixrussia()
+		zoom_admin0.fixegypt()
 		zoom_admin0.setccwtypes()
 		zoom_admin0.loadlakes()
 
@@ -7154,6 +7192,7 @@ def euromap(output,overrides,labels):
 	admin0=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
 	admin0.fixantarctica()
 	admin0.fixrussia()
+	admin0.fixegypt()
 	admin0.makecyprusfull()
 	admin0.setccwtypes()
 	if options['islakes']: admin0.loadlakes()
@@ -7362,6 +7401,7 @@ def countrymap(output,overrides,labels):
 	admin=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
 	admin.fixantarctica()
 	admin.fixrussia()
+	admin.fixegypt()
 	admin.setccwtypes()
 #	admin.loadlakes()
 
@@ -8077,6 +8117,7 @@ def pointmap(output,overrides,labels):
 	admin=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
 	admin.fixantarctica()
 	admin.fixrussia()
+	admin.fixegypt()
 	admin.setccwtypes()
 	if options['islakes']: admin.loadlakes()
 
@@ -8186,6 +8227,7 @@ def maximap(output,overrides,labels):
 	admin=ShpAdmin('admin0-nolakes.shp',[options['spherem']])
 	admin.fixantarctica()
 	admin.fixrussia()
+	admin.fixegypt()
 	admin.setccwtypes()
 	if options['islakes']: admin.loadlakes()
 
@@ -9291,7 +9333,7 @@ def georgia_options(param):
 	return options
 
 def northmacedonia_options(param):
-	if param.endswith('/'): return options_global.basic(param,'macedonia','MKD.MKD',isadmin1=True)
+	if param.endswith('/'): return options_global.basic(param,'northmacedonia','MKD.MKD',isadmin1=True)
 	options={'gsg':'MKD.MKD','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':-30,}
 	options['locatormap/title']='Macedonia locator'
 	options['countrymap/title']='Macedonia countrymap'
@@ -10266,9 +10308,14 @@ def brazilianisland_options(param):
 	options={'gsg':'BRI.BRI','isinsetleft':True,'lonlabel_lat':22,'latlabel_lon':-30,}
 	options['locatormap/title']='Brazilian Island locator'
 	options['countrymap/title']='Brazilian Island countrymap'
-	options['locatormap/iszoom']=False
+	options['presence']=['10m']
+	options['zoomm']='10m'
+	options['isfullhighlight']=True
+	options['locatormap/iszoom']=True
+	options['locatormap/iszoom34']=True
+	options['locatormap/zoom']=64
 	options['centerdot']=(20,3)
-	options['countrymap/zoom']=128
+	options['countrymap/zoom']=512
 #	options['isfullpartlabels'] = True
 	return options
 
@@ -10757,11 +10804,12 @@ def southernpatagonianicefield_options(param):
 	options['locatormap/title']='Southern Patagonian Ice Field locator'
 	options['countrymap/title']='Southern Patagonian Ice Field countrymap'
 	options['presence']=['10m']
+	options['isfullhighlight']=True
 	options['locatormap/iszoom']=True
 	options['locatormap/iszoom34']=True
 	options['locatormap/zoom']=5
 	options['centerdot']=(20,3)
-	options['countrymap/zoom']=50 # TODO
+	options['countrymap/zoom']=64
 	return options
 
 def birtawil_options(param):
@@ -10770,11 +10818,12 @@ def birtawil_options(param):
 	options['locatormap/title']='Bir Tawil locator'
 	options['countrymap/title']='Bir Tawil countrymap'
 	options['presence']=['10m']
+	options['isfullhighlight']=True
 	options['locatormap/iszoom']=True
 	options['locatormap/iszoom34']=True
 	options['locatormap/zoom']=5
 	options['centerdot']=(20,3)
-	options['countrymap/zoom']=50 # TODO
+	options['countrymap/zoom']=8
 	return options
 
 def antarctica_options(param):
@@ -10793,7 +10842,7 @@ def australia_options(param):
 	options={'gsg':'AU1.AUS','isinsetleft':True,'lonlabel_lat':10,'latlabel_lon':180,}
 	options['locatormap/title']='Australia locator'
 	options['countrymap/title']='Australia countrymap'
-	options['moredots_10m']=[ (4,False[12, 33 ]),]
+	options['moredots_10m']=[ (4,False,[12, 33 ]),]
 	options['countrymap/zoom']=2
 	options_global.handle(options,param)
 	return options
